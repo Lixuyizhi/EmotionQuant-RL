@@ -5,7 +5,7 @@ __pycache__/
 
 # Jupyter Notebook检查点
 .ipynb_checkpoints/
-
+record.ipynb
 # 虚拟环境
 venv/
 .env/
@@ -18,10 +18,10 @@ results/
 
 # 数据
 *.csv
-data/
+/data
 
 # 模型
-models/
+/models
 *.zip
 
 # 配置
