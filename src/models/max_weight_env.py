@@ -8,9 +8,8 @@ import yaml
 
 logger = logging.getLogger(__name__)
 
-class OilTradingEnv(gym.Env):
-    """原油期货交易环境，兼容gymnasium"""
-    
+class MaxWeightTradingEnv(gym.Env):
+    """最大权重信号交易环境：模型输出权重，实际只用权重最大的因子信号做交易决策"""
     def __init__(self, df: pd.DataFrame, config_path: str = "config/config.yaml"):
         super().__init__()
         with open(config_path, 'r', encoding='utf-8') as f:
@@ -18,27 +17,25 @@ class OilTradingEnv(gym.Env):
         self.df = df.copy()
         self.current_step = 0
         self.max_steps = len(df) - 1
-        self.initial_balance = self.config['strategy']['weighted_strategy']['initial_balance']
-        self.transaction_fee = self.config['strategy']['weighted_strategy']['transaction_fee']
-        self.slippage = self.config['strategy']['weighted_strategy']['slippage']
-        self.position_size = self.config['strategy']['weighted_strategy']['position_size']
-        
+        # 信号因子列
+        self.signal_columns = ['RSI_signal', 'BB_signal', 'SMA_signal']
+        self.initial_balance = self.config['strategy']['max_weight_strategy']['initial_balance']
+        self.transaction_fee = self.config['strategy']['max_weight_strategy']['transaction_fee']
+        self.slippage = self.config['strategy']['max_weight_strategy']['slippage']
+        self.position_size = self.config['strategy']['max_weight_strategy']['position_size']
         self._setup_spaces()
         self.trades = []
         self.portfolio_values = []
+        self.weights_history = []
 
     def _setup_spaces(self):
-        feature_columns = [col for col in self.df.columns 
-                          if col not in ['date', 'open', 'high', 'low', 'close', 'volume'] 
-                          and not col.startswith('target_')]
-        self.n_features = len(feature_columns)
-        self.feature_columns = feature_columns
-        
-        self.action_space = spaces.Discrete(3)
+        # 动作空间：3个连续权重
+        self.action_space = spaces.Box(low=0.0, high=1.0, shape=(3,), dtype=np.float32)
+        # 观察空间：3个信号 + 账户信息
         self.observation_space = spaces.Box(
-            low=-np.inf, 
-            high=np.inf, 
-            shape=(self.n_features + 4,),
+            low=-np.inf,
+            high=np.inf,
+            shape=(6,),  # 3信号+3账户
             dtype=np.float32
         )
 
@@ -53,36 +50,73 @@ class OilTradingEnv(gym.Env):
         self.total_buy_value = 0
         self.trades = []
         self.portfolio_values = []
-        
+        self.weights_history = []
         obs = self._get_observation()
         info = {}
         return obs, info
 
-    def step(self, action: int):
+    def step(self, action: np.ndarray):
+        # 归一化权重
+        weights = self._normalize_weights(action)
+        self.weights_history.append(weights.copy())
+        # 获取当前信号
+        current_signals = self._get_current_signals()
+        # 只用权重最大的信号做决策
+        max_idx = np.argmax(weights)
+        chosen_signal = current_signals[max_idx]
+        # 信号转动作
+        trade_action = self._signal_to_action(chosen_signal)
         current_price = self.df.iloc[self.current_step]['close']
-        
-        reward = self._execute_trade(action, current_price)
+        reward = self._execute_trade(trade_action, current_price)
         self.current_step += 1
         portfolio_value = self._get_portfolio_value(current_price)
         self.portfolio_values.append(portfolio_value)
-        
         terminated = self.current_step >= self.max_steps
         truncated = False
         obs = self._get_observation()
-        
         info = {
             'portfolio_value': portfolio_value,
             'balance': self.balance,
             'shares_held': self.shares_held,
             'current_price': current_price,
-            'step': self.current_step
+            'step': self.current_step,
+            'weights': weights,
+            'chosen_signal': chosen_signal
         }
-        
         return obs, reward, terminated, truncated, info
+
+    def _normalize_weights(self, weights: np.ndarray) -> np.ndarray:
+        total = np.sum(weights)
+        if total > 0:
+            return weights / total
+        else:
+            return np.array([1/3, 1/3, 1/3], dtype=np.float32)
+
+    def _get_current_signals(self) -> np.ndarray:
+        if self.current_step >= len(self.df):
+            return np.zeros(3, dtype=np.float32)
+        signals = []
+        for signal_col in self.signal_columns:
+            if signal_col in self.df.columns:
+                signal_value = self.df.iloc[self.current_step][signal_col]
+                if pd.isna(signal_value):
+                    signal_value = 0
+                signals.append(signal_value)
+            else:
+                signals.append(0)
+        return np.array(signals, dtype=np.float32)
+
+    def _signal_to_action(self, signal: float) -> int:
+        if signal > 0.1:
+            return 1  # 买入
+        elif signal < -0.1:
+            return -1  # 卖出
+        else:
+            return 0  # 持有
 
     def _execute_trade(self, action: int, current_price: float) -> float:
         portfolio_value_before = self._get_portfolio_value(current_price)
-        if action == 0:  # 卖出
+        if action == -1:  # 卖出
             if self.shares_held > 0:
                 shares_to_sell = min(self.shares_held, int(self.shares_held * self.position_size))
                 if shares_to_sell > 0:
@@ -99,7 +133,7 @@ class OilTradingEnv(gym.Env):
                         'price': sell_price,
                         'value': sell_value
                     })
-        elif action == 2:  # 买入
+        elif action == 1:  # 买入
             if self.balance > 0:
                 max_shares = int(self.balance / (current_price * (1 + self.slippage + self.transaction_fee)))
                 shares_to_buy = min(max_shares, int(max_shares * self.position_size))
@@ -128,14 +162,12 @@ class OilTradingEnv(gym.Env):
     def _get_observation(self) -> np.ndarray:
         if self.current_step >= len(self.df):
             return np.zeros(self.observation_space.shape[0])
-        features = self.df.iloc[self.current_step][self.feature_columns].values
-        current_price = self.df.iloc[self.current_step]['close']
+        current_signals = self._get_current_signals()
         observation = np.concatenate([
-            features,
+            current_signals,
             [self.shares_held],
             [self.balance],
-            [current_price],
-            [self._get_portfolio_value(current_price)]
+            [self._get_portfolio_value(self.df.iloc[self.current_step]['close'])]
         ])
         return observation.astype(np.float32)
 
@@ -154,7 +186,6 @@ class OilTradingEnv(gym.Env):
             'max_drawdown': self._calculate_max_drawdown(portfolio_values),
             'total_trades': len(self.trades)
         }
-        
         return stats
 
     def _calculate_max_drawdown(self, portfolio_values: np.ndarray) -> float:
@@ -166,83 +197,4 @@ class OilTradingEnv(gym.Env):
             dd = (peak - value) / peak
             if dd > max_dd:
                 max_dd = dd
-        return max_dd
-
-class MultiFactorTradingEnv(OilTradingEnv):
-    def __init__(self, df: pd.DataFrame, feature_weights: Dict[str, float], config_path: str = "config/config.yaml"):
-        super().__init__(df, config_path)
-        self.feature_weights = feature_weights
-        
-    def _get_weighted_action(self, observation: np.ndarray) -> int:
-        features = observation[:self.n_features]
-        action_signals = {}
-        weighted_sum = 0
-        for feature_name, weight in self.feature_weights.items():
-            if feature_name in self.feature_columns:
-                feature_idx = self.feature_columns.index(feature_name)
-                feature_value = features[feature_idx]
-                if 'RSI' in feature_name:
-                    if feature_value > 70:
-                        signal = -1
-                    elif feature_value < 30:
-                        signal = 1
-                    else:
-                        signal = 0
-                elif 'MACD' in feature_name:
-                    signal = 1 if feature_value > 0 else -1
-                elif 'BB' in feature_name:
-                    signal = -1 if feature_value > 0.8 else (1 if feature_value < 0.2 else 0)
-                elif 'momentum' in feature_name:
-                    signal = 1 if feature_value > 0.02 else (-1 if feature_value < -0.02 else 0)
-                else:
-                    signal = 1 if feature_value > 0 else (-1 if feature_value < 0 else 0)
-                action_signals[feature_name] = signal
-                weighted_sum += signal * weight
-        if weighted_sum > 0.1:
-            return 2
-        elif weighted_sum < -0.1:
-            return 0
-        else:
-            return 1
-
-class MaxWeightTradingEnv(OilTradingEnv):
-    def __init__(self, df: pd.DataFrame, feature_weights: Dict[str, float], config_path: str = "config/config.yaml"):
-        super().__init__(df, config_path)
-        self.feature_weights = feature_weights
-        
-    def _get_max_weight_action(self, observation: np.ndarray) -> int:
-        features = observation[:self.n_features]
-        max_weight = 0
-        best_action = 1  # 默认持有
-        
-        for feature_name, weight in self.feature_weights.items():
-            if feature_name in self.feature_columns:
-                feature_idx = self.feature_columns.index(feature_name)
-                feature_value = features[feature_idx]
-                
-                # 根据特征值确定动作
-                if 'RSI' in feature_name:
-                    if feature_value > 70:
-                        action = 0  # 卖出
-                    elif feature_value < 30:
-                        action = 2  # 买入
-                    else:
-                        action = 1  # 持有
-                elif 'MACD' in feature_name:
-                    action = 2 if feature_value > 0 else 0
-                elif 'BB' in feature_name:
-                    if feature_value > 0.8:
-                        action = 0
-                    elif feature_value < 0.2:
-                        action = 2
-                    else:
-                        action = 1
-                else:
-                    action = 2 if feature_value > 0 else (0 if feature_value < 0 else 1)
-                
-                # 选择权重最大的动作
-                if weight > max_weight:
-                    max_weight = weight
-                    best_action = action
-        
-        return best_action 
+        return max_dd 

@@ -14,10 +14,11 @@ import logging
 from sklearn.model_selection import train_test_split
 import matplotlib.pyplot as plt
 import seaborn as sns
+import importlib
+import re
 
-from src.models.trading_env import OilTradingEnv, MultiFactorTradingEnv, MaxWeightTradingEnv
 from src.models.signal_weight_env import SignalWeightTradingEnv
-
+from src.models.max_weight_env import MaxWeightTradingEnv
 logger = logging.getLogger(__name__)
 
 class RLTrainer:
@@ -48,41 +49,23 @@ class RLTrainer:
         self.model = None
         self.env = None
         
-    def create_env(self, df: pd.DataFrame, env_type: str = "standard") -> OilTradingEnv:
-        """创建交易环境
-        
-        Args:
-            df: 数据DataFrame
-            env_type: 环境类型 ("standard", "weighted", "max_weight", "signal_weight")
-            
-        Returns:
-            交易环境实例
+    def create_env(self, df: pd.DataFrame, env_type: str = None, config: dict = None) -> object:
         """
-        if env_type == "standard":
-            self.env = OilTradingEnv(df, "config/config.yaml")
-        elif env_type == "weighted":
-            # 使用简单的等权重
-            feature_columns = [col for col in df.columns 
-                              if col not in ['date', 'open', 'high', 'low', 'close', 'volume'] 
-                              and not col.startswith('target_')]
-            feature_weights = {feature: 1.0/len(feature_columns) for feature in feature_columns}
-            self.env = MultiFactorTradingEnv(df, feature_weights, "config/config.yaml")
-        elif env_type == "max_weight":
-            # 使用简单的等权重
-            feature_columns = [col for col in df.columns 
-                              if col not in ['date', 'open', 'high', 'low', 'close', 'volume'] 
-                              and not col.startswith('target_')]
-            feature_weights = {feature: 1.0/len(feature_columns) for feature in feature_columns}
-            self.env = MaxWeightTradingEnv(df, feature_weights, "config/config.yaml")
-        elif env_type == "signal_weight":
-            # 信号权重环境：学习给RSI_signal、BB_signal、SMA_signal分配权重
-            self.env = SignalWeightTradingEnv(df, "config/config.yaml")
-        else:
-            raise ValueError(f"不支持的环境类型: {env_type}")
-        
-        return self.env
+        只允许通过config['model_training']['model']['env_module']和env_name指定环境文件和类。
+        env_module: 环境文件名（不带.py），如 'signal_weight_env' 或 'max_weight_env'
+        env_name: 环境类名，如 'SignalWeightTradingEnv' 或 'MaxWeightTradingEnv'
+        """
+        if config is None:
+            raise ValueError("必须传递config参数，且在config['model_training']['model']中指定env_module和env_name")
+        env_class = config['model_training']['model'].get('env_name', None)
+        env_module = config['model_training']['model'].get('env_module', None)
+        if not env_class or not env_module:
+            raise ValueError("config['model_training']['model']中必须指定env_module和env_name")
+        module = importlib.import_module(f"src.models.{env_module}")
+        env_cls = getattr(module, env_class)
+        return env_cls(df, "config/config.yaml")
     
-    def create_model(self, env: OilTradingEnv, algorithm: str = None) -> object:
+    def create_model(self, env: object, algorithm: str = None) -> object:
         """创建强化学习模型
         
         Args:
@@ -141,50 +124,24 @@ class RLTrainer:
         
         return self.model
     
-    def train_model(self, df: pd.DataFrame, env_type: str = "standard", 
-                   algorithm: str = None, total_timesteps: int = None) -> Dict:
-        """训练模型
-        
-        Args:
-            df: 数据DataFrame
-            env_type: 环境类型
-            algorithm: 算法名称
-            total_timesteps: 训练步数
-            
-        Returns:
-            训练结果字典
-        """
+    def train_model(self, df: pd.DataFrame, env_type: str = None, 
+                   algorithm: str = None, total_timesteps: int = None, config: dict = None) -> Dict:
+        """训练模型"""
         total_timesteps = total_timesteps or self.model_config['total_timesteps']
-        
-        # 数据分割
-        train_df, test_df = self._split_data(df)
-        
-        # 创建环境
-        env = self.create_env(train_df, env_type)
-        
-        # 创建模型
+        train_df, val_df, test_df = self._split_data(df)
+        env = self.create_env(train_df, env_type, config)
         model = self.create_model(env, algorithm)
-        
-        # 设置回调函数
-        callbacks = self._setup_callbacks(env, test_df, env_type)
-        
+        callbacks = self._setup_callbacks(env, val_df, env_type, config)
         logger.info(f"开始训练 {algorithm} 模型，总步数: {total_timesteps}")
-        
-        # 训练模型
         model.learn(
             total_timesteps=total_timesteps,
             callback=callbacks,
             progress_bar=True
         )
-        
-        # 保存模型
         model_path = f"{self.storage_config['model_path']}/{algorithm}_{env_type}_model"
         model.save(model_path)
         logger.info(f"模型已保存到: {model_path}")
-        
-        # 评估模型
-        evaluation_results = self.evaluate_model(model, test_df, env_type)
-        
+        evaluation_results = self.evaluate_model(model, test_df, env_type, config)
         return {
             'model': model,
             'model_path': model_path,
@@ -196,53 +153,33 @@ class RLTrainer:
             }
         }
     
-    def _split_data(self, df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """分割数据为训练集和测试集
-        
-        Args:
-            df: 数据DataFrame
-            
-        Returns:
-            训练集和测试集
-        """
+    def _split_data(self, df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+        """分割数据为训练集、验证集和测试集"""
         train_split = self.training_config['train_split']
+        validation_split = self.training_config['validation_split']
         test_split = self.training_config['test_split']
-        
-        # 按时间分割
-        split_idx = int(len(df) * train_split)
-        train_df = df.iloc[:split_idx].copy()
-        test_df = df.iloc[split_idx:].copy()
-        
-        logger.info(f"训练集大小: {len(train_df)}, 测试集大小: {len(test_df)}")
-        
-        return train_df, test_df
+        n = len(df)
+        train_end = int(n * train_split)
+        val_end = train_end + int(n * validation_split)
+        train_df = df.iloc[:train_end].copy()
+        val_df = df.iloc[train_end:val_end].copy()
+        test_df = df.iloc[val_end:].copy()
+        logger.info(f"训练集大小: {len(train_df)}, 验证集大小: {len(val_df)}, 测试集大小: {len(test_df)}")
+        return train_df, val_df, test_df
     
-    def _setup_callbacks(self, env: DummyVecEnv, test_df: pd.DataFrame, env_type: str = "standard") -> List:
-        """设置回调函数
-        
-        Args:
-            env: 训练环境
-            test_df: 测试数据
-            env_type: 环境类型
-            
-        Returns:
-            回调函数列表
-        """
+    def _setup_callbacks(self, env: DummyVecEnv, test_df: pd.DataFrame, env_type: str = None, config: dict = None) -> List:
+        """设置回调函数"""
         callbacks = []
-        
-        # 检查点回调
         checkpoint_callback = CheckpointCallback(
             save_freq=10000,
             save_path=f"{self.storage_config['model_path']}/checkpoints/",
             name_prefix="rl_model"
         )
         callbacks.append(checkpoint_callback)
-        
         # 评估回调（使用相同的环境类型）
-        eval_env = self.create_env(test_df, env_type)
+        eval_env = self.create_env(test_df, env_type, config)
         eval_env = Monitor(eval_env)
         eval_env = DummyVecEnv([lambda: eval_env])
-        
         eval_callback = EvalCallback(
             eval_env,
             best_model_save_path=f"{self.storage_config['model_path']}/best/",
@@ -252,61 +189,38 @@ class RLTrainer:
             render=False
         )
         callbacks.append(eval_callback)
-        
         return callbacks
     
-    def evaluate_model(self, model: object, test_df: pd.DataFrame, 
-                      env_type: str = "standard") -> Dict:
-        """评估模型
-        
-        Args:
-            model: 训练好的模型
-            test_df: 测试数据
-            env_type: 环境类型
-            
-        Returns:
-            评估结果
-        """
+    def evaluate_model(self, model: object, test_df: pd.DataFrame, env_type: str = None, config: dict = None) -> Dict:
+        """评估模型"""
         # 创建测试环境
-        test_env = self.create_env(test_df, env_type)
-        
+        test_env = self.create_env(test_df, env_type, config)
         # 运行测试
         obs = test_env.reset()
-        # 处理Gym API vs SB3 API兼容性
         if isinstance(obs, tuple):
-            obs = obs[0]  # 如果是元组，取第一个元素（观察）
-        
+            obs = obs[0]
         done = False
         total_reward = 0
         step_count = 0
-        
         while not done:
             action, _ = model.predict(obs, deterministic=True)
             step_result = test_env.step(action)
-            
-            # 处理Gym API vs SB3 API兼容性
-            if len(step_result) == 4:  # Gym API: (obs, reward, done, info)
+            if len(step_result) == 4:
                 obs, reward, done, info = step_result
-            else:  # SB3 API: (obs, reward, done, truncated, info)
+            else:
                 obs, reward, done, truncated, info = step_result
                 done = done or truncated
-            
             total_reward += reward
             step_count += 1
-        
-        # 获取投资组合统计
         portfolio_stats = test_env.get_portfolio_stats()
-        
         evaluation_results = {
             'total_reward': total_reward,
             'step_count': step_count,
             'portfolio_stats': portfolio_stats,
             'trades': test_env.trades
         }
-        
         logger.info(f"模型评估完成，总奖励: {total_reward:.4f}")
         logger.info(f"投资组合统计: {portfolio_stats}")
-        
         return evaluation_results
     
     def load_model(self, model_path: str, algorithm: str = None) -> object:

@@ -61,7 +61,7 @@ def load_processed_data(data_dir: str = "data/processed") -> tuple:
 
 def train_model(config: dict, df_features: pd.DataFrame, 
                 algorithm: str = None, total_timesteps: int = None,
-                env_type: str = "signal_weight", save_model: bool = True) -> dict:
+                env_type: str = None, save_model: bool = True) -> dict:
     """训练强化学习模型
     
     Args:
@@ -69,7 +69,7 @@ def train_model(config: dict, df_features: pd.DataFrame,
         df_features: 包含特征的DataFrame
         algorithm: 算法名称，默认使用配置文件中的设置
         total_timesteps: 训练步数，默认使用配置文件中的设置
-        env_type: 环境类型，默认使用信号权重环境
+        env_type: 环境类型，若为None则自动从config['model_training']['model']['env_name']读取
         save_model: 是否保存模型
         
     Returns:
@@ -83,6 +83,8 @@ def train_model(config: dict, df_features: pd.DataFrame,
         # 使用配置中的默认值
         algorithm = algorithm or config['model_training']['model']['algorithm']
         total_timesteps = total_timesteps or config['model_training']['model']['total_timesteps']
+        env_name = env_type or config['model_training']['model'].get('env_name', 'SignalWeightTradingEnv')
+        logger.info(f"使用环境: {env_name}")
         
         logger.info(f"训练算法: {algorithm}")
         logger.info(f"训练步数: {total_timesteps}")
@@ -94,9 +96,10 @@ def train_model(config: dict, df_features: pd.DataFrame,
         logger.info("开始训练...")
         results = trainer.train_model(
             df=df_features,
-            env_type=env_type,
+            env_type=env_name,
             algorithm=algorithm,
-            total_timesteps=total_timesteps
+            total_timesteps=total_timesteps,
+            config=config
         )
         
         # 保存训练结果
