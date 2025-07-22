@@ -10,19 +10,33 @@ logger = logging.getLogger(__name__)
 
 class MaxWeightTradingEnv(gym.Env):
     """最大权重信号交易环境：模型输出权重，实际只用权重最大的因子信号做交易决策"""
-    def __init__(self, df: pd.DataFrame, config_path: str = "config/config.yaml"):
+    def __init__(self, df: pd.DataFrame, config_path: str = "config/config.yaml", env_kwargs: dict = None, **kwargs):
         super().__init__()
         with open(config_path, 'r', encoding='utf-8') as f:
-            self.config = yaml.safe_load(f)
+            config = yaml.safe_load(f)
+        # 读取默认参数
+        # 优先从model_training.max_weight_env，否则从backtest.env_params.max_weight_env
+        file_config = config.get('model_training', {}).get('max_weight_env', {})
+        if not file_config:
+            file_config = config.get('backtest', {}).get('env_params', {}).get('max_weight_env', {})
+        env_config = dict(file_config)
+        if env_kwargs:
+            env_config.update(env_kwargs)
+        env_config.update(kwargs)
+
         self.df = df.copy()
         self.current_step = 0
         self.max_steps = len(df) - 1
         # 信号因子列
         self.signal_columns = ['RSI_signal', 'BB_signal', 'SMA_signal']
-        self.initial_balance = self.config['strategy']['max_weight_strategy']['initial_balance']
-        self.transaction_fee = self.config['strategy']['max_weight_strategy']['transaction_fee']
-        self.slippage = self.config['strategy']['max_weight_strategy']['slippage']
-        self.position_size = self.config['strategy']['max_weight_strategy']['position_size']
+        self.initial_balance = env_config.get('initial_balance', 100000)
+        self.transaction_fee = env_config.get('transaction_fee', 0.001)
+        self.slippage = env_config.get('slippage', 0.0005)
+        self.position_size = env_config.get('position_size', 0.1)
+        self.reward_scale = env_config.get('reward_scale', 1.0)
+        self.max_position_ratio = env_config.get('max_position_ratio', 0.9)
+        self.min_trade_amount = env_config.get('min_trade_amount', 1000)
+        # ...如有更多参数可补充
         self._setup_spaces()
         self.trades = []
         self.portfolio_values = []

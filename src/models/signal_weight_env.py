@@ -14,45 +14,50 @@ class SignalWeightTradingEnv(gym.Env):
     然后根据加权总和决定交易方向
     """
     
-    def __init__(self, df: pd.DataFrame, config_path: str = "config/config.yaml"):
+    def __init__(self, df: pd.DataFrame, config_path: str = "config/config.yaml", env_kwargs: dict = None, **kwargs):
         super().__init__()
+        # 读取配置
         with open(config_path, 'r', encoding='utf-8') as f:
-            self.config = yaml.safe_load(f)
-        
+            config = yaml.safe_load(f)
+        # 读取默认参数
+        file_config = config.get('model_training', {}).get('signal_weight_env', {})
+        # 合并外部参数，优先用env_kwargs和kwargs
+        env_config = dict(file_config)
+        if env_kwargs:
+            env_config.update(env_kwargs)
+        env_config.update(kwargs)
+
         self.df = df.copy()
         self.current_step = 0
         self.max_steps = len(df) - 1
-        
-        # 从配置文件读取信号权重环境参数
-        env_config = self.config.get('model_training', {}).get('signal_weight_env', {})
-        
+
         # 基础交易参数
         self.initial_balance = env_config.get('initial_balance', 100000)
-        self.transaction_fee = env_config.get('transaction_fee', 0.001)  # 0.1%
-        self.slippage = env_config.get('slippage', 0.0005)  # 0.05%
-        self.position_size = env_config.get('position_size', 0.1)  # 10%
-        
+        self.transaction_fee = env_config.get('transaction_fee', 0.001)
+        self.slippage = env_config.get('slippage', 0.0005)
+        self.position_size = env_config.get('position_size', 0.1)
+
         # 交易阈值参数
-        self.buy_threshold = env_config.get('buy_threshold', 0.1)  # 买入阈值
-        self.sell_threshold = env_config.get('sell_threshold', -0.1)  # 卖出阈值
-        
+        self.buy_threshold = env_config.get('buy_threshold', 0.1)
+        self.sell_threshold = env_config.get('sell_threshold', -0.1)
+
         # 风险控制参数
-        self.max_position_ratio = env_config.get('max_position_ratio', 0.8)  # 最大仓位比例
-        self.min_trade_amount = env_config.get('min_trade_amount', 1000)  # 最小交易金额
-        
+        self.max_position_ratio = env_config.get('max_position_ratio', 0.8)
+        self.min_trade_amount = env_config.get('min_trade_amount', 1000)
+
         # 奖励函数参数
-        self.reward_scale = env_config.get('reward_scale', 1.0)  # 奖励缩放因子
-        self.risk_penalty = env_config.get('risk_penalty', 0.01)  # 风险惩罚系数
-        
+        self.reward_scale = env_config.get('reward_scale', 1.0)
+        self.risk_penalty = env_config.get('risk_penalty', 0.01)
+
         # 交易信号列名
         self.signal_columns = ['RSI_signal', 'BB_signal', 'SMA_signal']
-        
+
         # 其他特征列（不包括交易信号）
         self.feature_columns = [col for col in self.df.columns 
                                if col not in ['date', 'open', 'high', 'low', 'close', 'volume'] 
                                and not col.startswith('target_')
                                and col not in self.signal_columns]
-        
+
         self._setup_spaces()
         self.trades = []
         self.portfolio_values = []

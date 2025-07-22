@@ -33,7 +33,6 @@ class RLTrainer:
         with open(config_path, 'r', encoding='utf-8') as f:
             self.config = yaml.safe_load(f)
         
-        # 修正：适配新配置结构
         self.model_config = self.config['model_training']['model']
         self.training_config = self.config['model_training']['training']
         self.storage_config = self.config['model_training']['storage']
@@ -63,7 +62,10 @@ class RLTrainer:
             raise ValueError("config['model_training']['model']中必须指定env_module和env_name")
         module = importlib.import_module(f"src.models.{env_module}")
         env_cls = getattr(module, env_class)
-        return env_cls(df, "config/config.yaml")
+        # 自动读取环境参数
+        env_param_key = env_module  # 'signal_weight_env' 或 'max_weight_env'
+        env_kwargs = config['model_training'].get(env_param_key, {})
+        return env_cls(df, "config/config.yaml", env_kwargs=env_kwargs)
     
     def create_model(self, env: object, algorithm: str = None) -> object:
         """创建强化学习模型
@@ -76,11 +78,11 @@ class RLTrainer:
             强化学习模型
         """
         algorithm = algorithm or self.model_config['algorithm']
-        
+        algo = self.model_config['algorithm']
+        env_name = self.model_config['env_name']
         # 包装环境
         env = Monitor(env)
         env = DummyVecEnv([lambda: env])
-        
         # 创建模型
         if algorithm == "PPO":
             self.model = PPO(
@@ -95,7 +97,7 @@ class RLTrainer:
                 vf_coef=self.model_config['vf_coef'],
                 max_grad_norm=self.model_config['max_grad_norm'],
                 verbose=1,
-                tensorboard_log=f"{self.storage_config['log_path']}/tensorboard/"
+                tensorboard_log=f"logs/{algo}_{env_name}/tensorboard/"
             )
         elif algorithm == "A2C":
             self.model = A2C(
@@ -108,7 +110,7 @@ class RLTrainer:
                 vf_coef=self.model_config['vf_coef'],
                 max_grad_norm=self.model_config['max_grad_norm'],
                 verbose=1,
-                tensorboard_log=f"{self.storage_config['log_path']}/tensorboard/"
+                tensorboard_log=f"logs/{algo}_{env_name}/tensorboard/"
             )
         elif algorithm == "DQN":
             self.model = DQN(
@@ -117,11 +119,10 @@ class RLTrainer:
                 learning_rate=self.model_config['learning_rate'],
                 gamma=self.model_config['gamma'],
                 verbose=1,
-                tensorboard_log=f"{self.storage_config['log_path']}/tensorboard/"
+                tensorboard_log=f"logs/{algo}_{env_name}/tensorboard/"
             )
         else:
             raise ValueError(f"不支持的算法: {algorithm}")
-        
         return self.model
     
     def train_model(self, df: pd.DataFrame, env_type: str = None, 
@@ -138,10 +139,52 @@ class RLTrainer:
             callback=callbacks,
             progress_bar=True
         )
-        model_path = f"{self.storage_config['model_path']}/{algorithm}_{env_type}_model"
+        algo = self.model_config['algorithm']
+        env_name = self.model_config['env_name']
+        model_path = f"{self.storage_config['model_path']}/{algo}_{env_name}_model"
         model.save(model_path)
         logger.info(f"模型已保存到: {model_path}")
         evaluation_results = self.evaluate_model(model, test_df, env_type, config)
+        # 保存训练结果
+        results_dir = f"{self.storage_config['model_path']}/training_results/"
+        os.makedirs(results_dir, exist_ok=True)
+        # 保存训练配置
+        portfolio_stats = evaluation_results.get('portfolio_stats', {})
+        portfolio_stats_serializable = {}
+        for key, value in portfolio_stats.items():
+            if isinstance(value, np.ndarray):
+                portfolio_stats_serializable[key] = value.tolist()
+            elif isinstance(value, (np.integer, np.floating)):
+                portfolio_stats_serializable[key] = value.item()
+            else:
+                portfolio_stats_serializable[key] = value
+        training_config = {
+            'algorithm': algorithm,
+            'env_name': env_name,
+            'total_timesteps': total_timesteps,
+            'model_path': model_path,
+            'portfolio_stats': portfolio_stats_serializable
+        }
+        import json
+        with open(f"{results_dir}/{algo}_{env_name}_training_config.json", 'w', encoding='utf-8') as f:
+            json.dump(training_config, f, ensure_ascii=False, indent=2)
+        logger.info(f"训练配置已保存到: {results_dir}/{algo}_{env_name}_training_config.json")
+        # 保存评估结果
+        eval_file = f"{results_dir}/{algo}_{env_name}_evaluation_results.json"
+        def to_serializable(val):
+            if isinstance(val, np.ndarray):
+                return val.tolist()
+            elif isinstance(val, (np.integer, np.floating)):
+                return val.item()
+            elif isinstance(val, dict):
+                return {k: to_serializable(v) for k, v in val.items()}
+            elif isinstance(val, list):
+                return [to_serializable(v) for v in val]
+            else:
+                return val
+        with open(eval_file, 'w', encoding='utf-8') as f:
+            json.dump(to_serializable(evaluation_results), f, ensure_ascii=False, indent=2)
+        logger.info(f"评估结果已保存到: {eval_file}")
         return {
             'model': model,
             'model_path': model_path,
@@ -170,10 +213,13 @@ class RLTrainer:
     def _setup_callbacks(self, env: DummyVecEnv, test_df: pd.DataFrame, env_type: str = None, config: dict = None) -> List:
         """设置回调函数"""
         callbacks = []
+        algo = self.model_config['algorithm']
+        env_name = self.model_config['env_name']
+        # checkpoints
         checkpoint_callback = CheckpointCallback(
             save_freq=10000,
             save_path=f"{self.storage_config['model_path']}/checkpoints/",
-            name_prefix="rl_model"
+            name_prefix=f"{algo}_{env_name}_rl_model"
         )
         callbacks.append(checkpoint_callback)
         # 评估回调（使用相同的环境类型）
@@ -182,8 +228,8 @@ class RLTrainer:
         eval_env = DummyVecEnv([lambda: eval_env])
         eval_callback = EvalCallback(
             eval_env,
-            best_model_save_path=f"{self.storage_config['model_path']}/best/",
-            log_path=f"{self.storage_config['results_path']}/logs/",
+            best_model_save_path=f"{self.storage_config['model_path']}/best/{algo}_{env_name}_best_model/",
+            log_path=f"logs/{algo}_{env_name}/eval/",
             eval_freq=5000,
             deterministic=True,
             render=False
@@ -247,90 +293,6 @@ class RLTrainer:
         logger.info(f"模型已从 {model_path} 加载")
         
         return self.model
-    
-    def compare_strategies(self, df: pd.DataFrame) -> Dict:
-        """比较不同策略的性能
-        
-        Args:
-            df: 数据DataFrame
-            
-        Returns:
-            策略比较结果
-        """
-        strategies = ["standard", "weighted", "max_weight"]
-        results = {}
-        
-        for strategy in strategies:
-            logger.info(f"训练 {strategy} 策略...")
-            
-            try:
-                # 训练模型
-                train_result = self.train_model(df, env_type=strategy)
-                
-                # 保存结果
-                results[strategy] = {
-                    'portfolio_stats': train_result['evaluation_results']['portfolio_stats'],
-                    'total_reward': train_result['evaluation_results']['total_reward'],
-                    'model_path': train_result['model_path']
-                }
-                
-            except Exception as e:
-                logger.error(f"训练 {strategy} 策略失败: {str(e)}")
-                results[strategy] = None
-        
-        # 生成比较报告
-        comparison_report = self._generate_comparison_report(results)
-        
-        return {
-            'results': results,
-            'comparison_report': comparison_report
-        }
-    
-    def _generate_comparison_report(self, results: Dict) -> Dict:
-        """生成策略比较报告
-        
-        Args:
-            results: 策略结果字典
-            
-        Returns:
-            比较报告
-        """
-        report = {
-            'summary': {},
-            'best_strategy': None,
-            'recommendations': []
-        }
-        
-        valid_results = {k: v for k, v in results.items() if v is not None}
-        
-        if not valid_results:
-            return report
-        
-        # 找出最佳策略
-        best_strategy = max(valid_results.items(), 
-                          key=lambda x: x[1]['portfolio_stats']['sharpe_ratio'])
-        
-        report['best_strategy'] = best_strategy[0]
-        
-        # 生成摘要
-        for strategy, result in valid_results.items():
-            stats = result['portfolio_stats']
-            report['summary'][strategy] = {
-                'total_return': f"{stats['total_return']:.4f}",
-                'sharpe_ratio': f"{stats['sharpe_ratio']:.4f}",
-                'max_drawdown': f"{stats['max_drawdown']:.4f}",
-                'volatility': f"{stats['volatility']:.4f}",
-                'total_trades': stats['total_trades']
-            }
-        
-        # 生成建议
-        if best_strategy[1]['portfolio_stats']['sharpe_ratio'] > 1.0:
-            report['recommendations'].append("策略表现良好，夏普比率超过1.0")
-        
-        if best_strategy[1]['portfolio_stats']['max_drawdown'] < 0.2:
-            report['recommendations'].append("最大回撤控制在20%以内，风险控制良好")
-        
-        return report
     
     def plot_training_results(self, results: Dict, save_path: str = None):
         """绘制训练结果
