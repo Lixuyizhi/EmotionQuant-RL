@@ -58,6 +58,19 @@ class FeatureEngineer:
         
         logger.info("开始计算技术指标...")
         
+        # 添加OHLC归一化特征
+        logger.info("添加OHLC归一化特征...")
+        for col in ['open', 'high', 'low', 'close']:
+            # 使用简单的方法避免NaN值
+            # 方法1：相对于当前收盘价的比率
+            df[f'norm_{col}'] = df[col] / (df['close'] + 1e-8)
+            # 方法2：相对于前一日收盘价的变化率
+            df[f'pct_{col}'] = df[col].pct_change().fillna(0)
+            # 方法3：z-score归一化（使用全局统计）
+            mean_val = df[col].mean()
+            std_val = df[col].std()
+            df[f'zscore_{col}'] = (df[col] - mean_val) / (std_val + 1e-8)
+        
         # 移动平均线
         if "SMA" in self.technical_indicators:
             for period in self.lookback_periods:
@@ -170,23 +183,66 @@ class FeatureEngineer:
     
     def _add_trading_signals(self, df: pd.DataFrame) -> pd.DataFrame:
         """添加交易信号"""
-        # RSI信号
+        # 1. RSI信号
         if 'RSI_14' in df.columns:
             df['RSI_signal'] = np.where(df['RSI_14'] > 70, -1,  # 超买卖出
                                       np.where(df['RSI_14'] < 30, 1, 0))  # 超买卖入
         
-        # MACD信号
+        # 2. MACD信号
         if 'MACD' in df.columns and 'MACD_signal' in df.columns:
             df['MACD_signal'] = np.where(df['MACD'] > df['MACD_signal'], 1, -1)
         
-        # 布林带信号
+        # 3. 布林带信号
         if 'BB_upper' in df.columns and 'BB_lower' in df.columns:
             df['BB_signal'] = np.where(df['close'] > df['BB_upper'], -1,  # 突破上轨卖出
                                      np.where(df['close'] < df['BB_lower'], 1, 0))  # 突破下轨买入
         
-        # 移动平均线信号
+        # 4. 移动平均线信号
         if 'SMA_20' in df.columns:
             df['SMA_signal'] = np.where(df['close'] > df['SMA_20'], 1, -1)  # 价格在均线上方买入
+        
+        # 5. 价格动量信号
+        if 'close' in df.columns:
+            # 计算价格变化率
+            df['price_change'] = df['close'].pct_change()
+            df['momentum_signal'] = np.where(df['price_change'] > 0.02, 1,  # 强势上涨买入
+                                           np.where(df['price_change'] < -0.02, -1, 0))  # 强势下跌卖出
+        
+        # 6. 成交量信号
+        if 'volume' in df.columns:
+            # 计算成交量移动平均
+            df['volume_ma'] = df['volume'].rolling(window=20).mean()
+            df['volume_signal'] = np.where(df['volume'] > df['volume_ma'] * 1.5, 1,  # 放量买入
+                                         np.where(df['volume'] < df['volume_ma'] * 0.5, -1, 0))  # 缩量卖出
+        
+        # 7. 波动率信号
+        if 'ATR_14' in df.columns:
+            # 计算ATR相对值
+            df['atr_ratio'] = df['ATR_14'] / df['close']
+            df['volatility_signal'] = np.where(df['atr_ratio'] > df['atr_ratio'].rolling(20).mean() * 1.2, 1,  # 高波动买入
+                                             np.where(df['atr_ratio'] < df['atr_ratio'].rolling(20).mean() * 0.8, -1, 0))  # 低波动卖出
+        
+        # 8. 趋势强度信号
+        if 'EMA_20' in df.columns and 'SMA_20' in df.columns:
+            # 计算趋势强度
+            df['trend_strength'] = (df['EMA_20'] - df['SMA_20']) / df['SMA_20']
+            df['trend_signal'] = np.where(df['trend_strength'] > 0.01, 1,  # 强趋势买入
+                                        np.where(df['trend_strength'] < -0.01, -1, 0))  # 弱趋势卖出
+        
+        # 9. 支撑阻力信号
+        if 'high' in df.columns and 'low' in df.columns:
+            # 计算近期高低点
+            df['recent_high'] = df['high'].rolling(20).max()
+            df['recent_low'] = df['low'].rolling(20).min()
+            df['support_resistance_signal'] = np.where(df['close'] > df['recent_high'] * 0.98, 1,  # 接近阻力位买入
+                                                     np.where(df['close'] < df['recent_low'] * 1.02, -1, 0))  # 接近支撑位卖出
+        
+        # 10. 价格位置信号
+        if 'BB_upper' in df.columns and 'BB_lower' in df.columns and 'BB_middle' in df.columns:
+            # 计算价格在布林带中的位置
+            df['bb_position'] = (df['close'] - df['BB_lower']) / (df['BB_upper'] - df['BB_lower'])
+            df['position_signal'] = np.where(df['bb_position'] < 0.2, 1,  # 接近下轨买入
+                                           np.where(df['bb_position'] > 0.8, -1, 0))  # 接近上轨卖出
         
         return df
     

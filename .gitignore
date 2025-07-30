@@ -11,6 +11,8 @@ venv/
 .env/
 ENV/
 
+#回测结果
+backtest_results/
 # 日志和结果
 logs/
 results/
@@ -33,3 +35,4 @@ config/*.yaml
 # IDE配置
 .idea/
 .vscode/
+

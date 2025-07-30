@@ -51,12 +51,16 @@ class SignalWeightTradingEnv(gym.Env):
 
         # 交易信号列名
         self.signal_columns = ['RSI_signal', 'BB_signal', 'SMA_signal']
+        
+        # OHLC归一化列名
+        self.ohlc_columns = ['norm_open', 'norm_high', 'norm_low', 'norm_close']
 
         # 其他特征列（不包括交易信号）
         self.feature_columns = [col for col in self.df.columns 
                                if col not in ['date', 'open', 'high', 'low', 'close', 'volume'] 
                                and not col.startswith('target_')
-                               and col not in self.signal_columns]
+                               and col not in self.signal_columns
+                               and col not in self.ohlc_columns]
 
         self._setup_spaces()
         self.trades = []
@@ -74,12 +78,12 @@ class SignalWeightTradingEnv(gym.Env):
             dtype=np.float32
         )
         
-        # 观察空间：交易信号 + 账户信息（方案2）
-        # RSI_signal, BB_signal, SMA_signal, shares_held, balance, portfolio_value
+        # 观察空间：交易信号 + 账户信息 + OHLC数据
+        # RSI_signal, BB_signal, SMA_signal, shares_held, balance, portfolio_value, norm_open, norm_high, norm_low, norm_close
         self.observation_space = spaces.Box(
             low=-np.inf,
             high=np.inf,
-            shape=(6,),  # 3个信号 + 3个账户信息
+            shape=(10,),  # 3个信号 + 3个账户信息 + 4个OHLC数据
             dtype=np.float32
         )
 
@@ -284,7 +288,7 @@ class SignalWeightTradingEnv(gym.Env):
         return self.balance + (self.shares_held * current_price)
 
     def _get_observation(self) -> np.ndarray:
-        """获取观察（方案2：只包含交易信号和账户信息）"""
+        """获取观察（包含交易信号、账户信息和OHLC数据）"""
         if self.current_step >= len(self.df):
             return np.zeros(self.observation_space.shape[0])
         
@@ -292,12 +296,24 @@ class SignalWeightTradingEnv(gym.Env):
         current_signals = self._get_current_signals()
         current_price = self.df.iloc[self.current_step]['close']
         
-        # 构建观察向量：信号 + 账户信息
+        # 获取当前OHLC归一化数据
+        current_ohlc = []
+        for ohlc_col in self.ohlc_columns:
+            if ohlc_col in self.df.columns:
+                ohlc_value = self.df.iloc[self.current_step][ohlc_col]
+                if pd.isna(ohlc_value):
+                    ohlc_value = 1.0  # 默认值
+                current_ohlc.append(ohlc_value)
+            else:
+                current_ohlc.append(1.0)  # 默认值
+        
+        # 构建观察向量：信号 + 账户信息 + OHLC数据
         observation = np.concatenate([
             current_signals,  # RSI_signal, BB_signal, SMA_signal
             [self.shares_held],  # 当前持仓
             [self.balance],      # 当前余额
-            [self._get_portfolio_value(current_price)]  # 当前组合价值
+            [self._get_portfolio_value(current_price)],  # 当前组合价值
+            current_ohlc  # norm_open, norm_high, norm_low, norm_close
         ])
         
         return observation.astype(np.float32)

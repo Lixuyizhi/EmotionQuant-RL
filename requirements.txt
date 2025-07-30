@@ -11,4 +11,6 @@ stable-baselines3>=1.6.0
 gym>=0.21.0
 tqdm>=4.64.0
 yfinance>=0.1.87
-ta>=0.10.2 
+ta>=0.10.2
+PyYAML>=6.0
+openpyxl>=3.0.0 

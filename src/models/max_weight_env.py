@@ -29,6 +29,8 @@ class MaxWeightTradingEnv(gym.Env):
         self.max_steps = len(df) - 1
         # 信号因子列
         self.signal_columns = ['RSI_signal', 'BB_signal', 'SMA_signal']
+        # OHLC归一化列名
+        self.ohlc_columns = ['norm_open', 'norm_high', 'norm_low', 'norm_close']
         self.initial_balance = env_config.get('initial_balance', 100000)
         self.transaction_fee = env_config.get('transaction_fee', 0.001)
         self.slippage = env_config.get('slippage', 0.0005)
@@ -45,11 +47,11 @@ class MaxWeightTradingEnv(gym.Env):
     def _setup_spaces(self):
         # 动作空间：3个连续权重
         self.action_space = spaces.Box(low=0.0, high=1.0, shape=(3,), dtype=np.float32)
-        # 观察空间：3个信号 + 账户信息
+        # 观察空间：3个信号 + 账户信息 + OHLC数据
         self.observation_space = spaces.Box(
             low=-np.inf,
             high=np.inf,
-            shape=(6,),  # 3信号+3账户
+            shape=(10,),  # 3信号+3账户+4OHLC
             dtype=np.float32
         )
 
@@ -177,11 +179,25 @@ class MaxWeightTradingEnv(gym.Env):
         if self.current_step >= len(self.df):
             return np.zeros(self.observation_space.shape[0])
         current_signals = self._get_current_signals()
+        current_price = self.df.iloc[self.current_step]['close']
+        
+        # 获取当前OHLC归一化数据
+        current_ohlc = []
+        for ohlc_col in self.ohlc_columns:
+            if ohlc_col in self.df.columns:
+                ohlc_value = self.df.iloc[self.current_step][ohlc_col]
+                if pd.isna(ohlc_value):
+                    ohlc_value = 1.0  # 默认值
+                current_ohlc.append(ohlc_value)
+            else:
+                current_ohlc.append(1.0)  # 默认值
+        
         observation = np.concatenate([
-            current_signals,
-            [self.shares_held],
-            [self.balance],
-            [self._get_portfolio_value(self.df.iloc[self.current_step]['close'])]
+            current_signals,        # 3
+            [self.shares_held],     # 1
+            [self.balance],         # 1
+            [self._get_portfolio_value(current_price)], # 1
+            current_ohlc            # 4
         ])
         return observation.astype(np.float32)
 

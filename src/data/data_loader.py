@@ -31,6 +31,8 @@ class OilDataLoader:
         self.symbol = data_source.get('symbol', 'SC')
         self.start_date = data_source.get('start_date', '2020-01-01')
         self.end_date = data_source.get('end_date', '2024-01-01')
+        self.source = data_source.get('source', 'akshare')
+        self.local_file = data_source.get('local_file', None)
         
         # 确保数据目录存在
         os.makedirs(self.data_path, exist_ok=True)
@@ -54,26 +56,14 @@ class OilDataLoader:
         logger.info(f"正在获取 {symbol} 期货数据，时间范围: {start_date} 到 {end_date}")
         
         try:
-            # 使用akshare获取中国原油期货主力合约数据
-            if symbol == "SC":
-                # 获取原油期货主力合约数据
-                df = ak.futures_main_sina(symbol="SC0")
+            if self.source == 'local' and self.local_file:
+                # 使用本地Excel文件
+                logger.info(f"从本地文件加载数据: {self.local_file}")
+                df = self._load_local_data()
             else:
-                # 获取指定合约数据
-                df = ak.futures_zh_daily_sina(symbol=symbol)
-            
-            # 重命名列（根据实际返回的列数调整）
-            if len(df.columns) == 6:
-                df.columns = ['date', 'open', 'high', 'low', 'close', 'volume']
-            elif len(df.columns) == 8:
-                df.columns = ['date', 'open', 'high', 'low', 'close', 'volume', 'hold', 'settle']
-            else:
-                # 如果列数不匹配，只取前6列
-                df = df.iloc[:, :6]
-                df.columns = ['date', 'open', 'high', 'low', 'close', 'volume']
-            
-            # 转换日期格式
-            df['date'] = pd.to_datetime(df['date'])
+                # 使用akshare获取数据
+                logger.info("使用akshare获取数据")
+                df = self._load_akshare_data(symbol)
             
             # 过滤日期范围
             df = df[(df['date'] >= start_date) & (df['date'] <= end_date)]
@@ -84,7 +74,8 @@ class OilDataLoader:
             # 转换数据类型
             numeric_columns = ['open', 'high', 'low', 'close', 'volume']
             for col in numeric_columns:
-                df[col] = pd.to_numeric(df[col], errors='coerce')
+                if col in df.columns:
+                    df[col] = pd.to_numeric(df[col], errors='coerce')
             
             # 删除缺失值
             df = df.dropna()
@@ -96,6 +87,62 @@ class OilDataLoader:
         except Exception as e:
             logger.error(f"获取数据失败: {str(e)}")
             raise
+    
+    def _load_local_data(self) -> pd.DataFrame:
+        """从本地Excel文件加载数据"""
+        filepath = os.path.join(self.data_path, self.local_file)
+        
+        if not os.path.exists(filepath):
+            raise FileNotFoundError(f"本地数据文件不存在: {filepath}")
+        
+        # 读取Excel文件
+        df = pd.read_excel(filepath)
+        
+        # 重命名列以匹配标准格式
+        column_mapping = {
+            'DateTime': 'date',
+            'Open': 'open',
+            'High': 'high', 
+            'Low': 'low',
+            'Close': 'close',
+            'Volume': 'volume',
+            'OpenInterest': 'open_interest'
+        }
+        
+        # 只重命名存在的列
+        existing_columns = {k: v for k, v in column_mapping.items() if k in df.columns}
+        df = df.rename(columns=existing_columns)
+        
+        # 转换日期格式
+        df['date'] = pd.to_datetime(df['date'])
+        
+        logger.info(f"从本地文件加载了 {len(df)} 条数据记录")
+        return df
+    
+    def _load_akshare_data(self, symbol: str) -> pd.DataFrame:
+        """使用akshare获取数据"""
+        # 使用akshare获取中国原油期货主力合约数据
+        if symbol == "SC":
+            # 获取原油期货主力合约数据
+            df = ak.futures_main_sina(symbol="SC0")
+        else:
+            # 获取指定合约数据
+            df = ak.futures_zh_daily_sina(symbol=symbol)
+        
+        # 重命名列（根据实际返回的列数调整）
+        if len(df.columns) == 6:
+            df.columns = ['date', 'open', 'high', 'low', 'close', 'volume']
+        elif len(df.columns) == 8:
+            df.columns = ['date', 'open', 'high', 'low', 'close', 'volume', 'hold', 'settle']
+        else:
+            # 如果列数不匹配，只取前6列
+            df = df.iloc[:, :6]
+            df.columns = ['date', 'open', 'high', 'low', 'close', 'volume']
+        
+        # 转换日期格式
+        df['date'] = pd.to_datetime(df['date'])
+        
+        return df
     
     def get_multiple_contracts_data(self, symbols: list = None) -> dict:
         """获取多个合约的数据
@@ -169,11 +216,18 @@ class OilDataLoader:
         Returns:
             数据DataFrame
         """
-        cache_filename = f"{self.symbol}_{self.start_date}_{self.end_date}.csv"
+        # 根据数据源类型决定缓存文件名
+        if self.source == 'local' and self.local_file:
+            # 对于本地数据源，使用原始文件名作为缓存
+            cache_filename = self.local_file.replace('.xlsx', '.csv')
+        else:
+            # 对于akshare数据源，使用时间范围生成缓存文件名
+            cache_filename = f"{self.symbol}_{self.start_date}_{self.end_date}.csv"
+        
         cache_filepath = os.path.join(self.data_path, cache_filename)
         
         if use_cache and os.path.exists(cache_filepath):
-            logger.info("使用缓存数据")
+            logger.info(f"使用缓存数据: {cache_filename}")
             return self.load_data(cache_filename)
         
         # 获取新数据

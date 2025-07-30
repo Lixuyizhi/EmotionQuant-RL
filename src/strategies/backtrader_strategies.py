@@ -367,6 +367,210 @@ class BuyAndHoldStrategy(BaseStrategy):
             self.order = self.buy()
             self.bought = True
 
+class RLModelStrategy(BaseStrategy):
+    """强化学习模型策略 - 在Backtrader中集成训练好的RL模型"""
+    
+    params = (
+        ('model_path', None),  # 模型文件路径
+        ('algorithm', 'A2C'),  # 算法类型
+        ('env_type', 'signal_weight_env'),  # 环境类型
+        ('config_path', 'config/config.yaml'),  # 配置文件路径
+    )
+    
+    def __init__(self):
+        """初始化策略"""
+        super().__init__()
+        
+        # 导入必要的模块
+        from src.models.rl_trainer import RLTrainer
+        import yaml
+        
+        # 加载配置
+        with open(self.params.config_path, 'r', encoding='utf-8') as f:
+            self.config = yaml.safe_load(f)
+        
+        # 创建RL训练器
+        self.trainer = RLTrainer(self.params.config_path)
+        
+        # 准备数据（将Backtrader数据转换为DataFrame）
+        self.df_data = self._prepare_data_for_rl()
+        
+        # 创建环境
+        self.env = self.trainer.create_env(self.df_data, config=self.config)
+        
+        # 加载模型
+        self.model = self.trainer.load_model(self.params.model_path, self.params.algorithm)
+        
+        # 重置环境
+        self.obs = self.env.reset()
+        if isinstance(self.obs, tuple):
+            self.obs = self.obs[0]
+        
+        # 记录模型决策
+        self.model_decisions = []
+        self.model_weights = []
+        
+        logger.info(f"RL模型策略初始化完成，模型路径: {self.params.model_path}")
+    
+    def _prepare_data_for_rl(self):
+        """将Backtrader数据转换为RL环境需要的DataFrame格式"""
+        # 获取当前数据长度
+        data_length = len(self.data)
+        
+        # 创建DataFrame
+        df_data = pd.DataFrame({
+            'date': [self.data.datetime.date(i) for i in range(data_length)],
+            'open': [self.data.open[i] for i in range(data_length)],
+            'high': [self.data.high[i] for i in range(data_length)],
+            'low': [self.data.low[i] for i in range(data_length)],
+            'close': [self.data.close[i] for i in range(data_length)],
+            'volume': [self.data.volume[i] for i in range(data_length)]
+        })
+        
+        # 添加技术指标（模拟特征工程）
+        from src.features.feature_engineering import FeatureEngineer
+        engineer = FeatureEngineer()
+        df_features = engineer.add_technical_indicators(df_data)
+        df_features = engineer.add_target_variables(df_features)
+        df_features = engineer.create_trading_features(df_features)
+        
+        return df_features
+    
+    def next(self):
+        """策略主逻辑 - 使用RL模型进行决策"""
+        # 记录投资组合价值
+        self.portfolio_values.append(self.broker.getvalue())
+        
+        # 如果有未完成的订单，等待
+        if self.order:
+            return
+        
+        # 检查是否还有数据
+        if len(self.data) <= self.env.current_step:
+            return
+        
+        try:
+            # 使用RL模型进行预测
+            action, _ = self.model.predict(self.obs, deterministic=True)
+            
+            # 记录模型决策
+            self.model_decisions.append({
+                'date': self.data.datetime.date(0),
+                'action': action,
+                'portfolio_value': self.broker.getvalue()
+            })
+            
+            # 执行环境步骤
+            step_result = self.env.step(action)
+            if len(step_result) == 4:
+                self.obs, reward, done, info = step_result
+            else:
+                self.obs, reward, done, truncated, info = step_result
+                done = done or truncated
+            
+            # 根据环境信息执行交易
+            self._execute_rl_trade(info)
+            
+            # 记录权重信息
+            if 'signal_weights' in info:
+                self.model_weights.append({
+                    'date': self.data.datetime.date(0),
+                    'weights': info['signal_weights']
+                })
+            
+        except Exception as e:
+            logger.error(f"RL模型预测失败: {e}")
+            # 如果模型预测失败，使用默认策略
+            self._execute_default_trade()
+    
+    def _execute_rl_trade(self, info):
+        """根据RL环境信息执行交易"""
+        # 获取当前持仓
+        position = self.getposition()
+        
+        # 根据环境信息决定交易动作
+        if 'trade_action' in info:
+            trade_action = info['trade_action']
+            
+            if trade_action == 1 and not position:  # 买入信号且无持仓
+                self.log(f'RL模型买入信号: {info.get("weighted_signal", 0):.3f}')
+                self.order = self.buy()
+            
+            elif trade_action == -1 and position:  # 卖出信号且有持仓
+                self.log(f'RL模型卖出信号: {info.get("weighted_signal", 0):.3f}')
+                self.order = self.sell()
+        
+        # 如果没有明确的交易动作，使用加权信号
+        elif 'weighted_signal' in info:
+            weighted_signal = info['weighted_signal']
+            
+            if weighted_signal > 0.1 and not position:  # 买入信号
+                self.log(f'RL模型加权买入信号: {weighted_signal:.3f}')
+                self.order = self.buy()
+            
+            elif weighted_signal < -0.1 and position:  # 卖出信号
+                self.log(f'RL模型加权卖出信号: {weighted_signal:.3f}')
+                self.order = self.sell()
+    
+    def _execute_default_trade(self):
+        """默认交易策略（当RL模型失败时使用）"""
+        # 简单的移动平均策略
+        if len(self.data) < 20:
+            return
+        
+        sma_20 = sum(self.data.close.get(size=20)) / 20
+        current_price = self.data.close[0]
+        
+        position = self.getposition()
+        
+        if current_price > sma_20 and not position:
+            self.log('默认策略: 买入')
+            self.order = self.buy()
+        elif current_price < sma_20 and position:
+            self.log('默认策略: 卖出')
+            self.order = self.sell()
+    
+    def get_rl_model_stats(self) -> Dict:
+        """获取RL模型统计信息"""
+        if not self.model_decisions:
+            return {}
+        
+        # 分析模型决策
+        total_decisions = len(self.model_decisions)
+        buy_signals = sum(1 for d in self.model_decisions if d.get('action', [0,0,0])[0] > 0.5)
+        sell_signals = sum(1 for d in self.model_decisions if d.get('action', [0,0,0])[0] < 0.3)
+        
+        # 分析权重分布
+        weight_stats = {}
+        if self.model_weights:
+            weights_array = np.array([w['weights'] for w in self.model_weights])
+            weight_stats = {
+                'mean_weights': np.mean(weights_array, axis=0).tolist(),
+                'std_weights': np.std(weights_array, axis=0).tolist(),
+                'weight_history': self.model_weights
+            }
+        
+        return {
+            'total_decisions': total_decisions,
+            'buy_signals': buy_signals,
+            'sell_signals': sell_signals,
+            'weight_stats': weight_stats,
+            'model_decisions': self.model_decisions
+        }
+    
+    def get_strategy_stats(self) -> Dict:
+        """获取策略统计信息（包含RL模型信息）"""
+        base_stats = super().get_strategy_stats()
+        rl_stats = self.get_rl_model_stats()
+        
+        # 合并统计信息
+        base_stats.update({
+            'rl_model_stats': rl_stats,
+            'strategy_type': 'RL_Model_Strategy'
+        })
+        
+        return base_stats
+
 class BacktraderBacktester:
     """Backtrader回测器"""
     
