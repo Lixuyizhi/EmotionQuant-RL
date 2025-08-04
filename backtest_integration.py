@@ -264,10 +264,19 @@ def save_backtest_results(stats, model_path, df_backtest, actions_taken, rewards
         results_dir = "backtest_results"
         os.makedirs(results_dir, exist_ok=True)
         
-        # 生成结果文件名
+        # 生成结果文件名（包含算法和环境名）
+        try:
+            algo, env_name = parse_model_filename(model_path)
+        except Exception:
+            algo, env_name = "UnknownAlgo", "UnknownEnv"
         model_name = os.path.splitext(os.path.basename(model_path))[0]
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        result_file = f"{results_dir}/{model_name}_backtest_{timestamp}.json"
+        
+        # 如果是best_model，额外标注
+        if model_name == "best_model":
+            result_file = f"{results_dir}/{algo}_{env_name}_{model_name}_backtest_{timestamp}.json"
+        else:
+            result_file = f"{results_dir}/{algo}_{env_name}_final_backtest_{timestamp}.json"
         
         # 准备结果数据
         results = {
