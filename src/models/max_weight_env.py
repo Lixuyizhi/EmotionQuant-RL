@@ -27,31 +27,86 @@ class MaxWeightTradingEnv(gym.Env):
         self.df = df.copy()
         self.current_step = 0
         self.max_steps = len(df) - 1
+        
+        # 基础交易参数
+        self.initial_balance = env_config.get('initial_balance', 1000000)
+        self.transaction_fee = env_config.get('transaction_fee', 0.001)
+        self.slippage = env_config.get('slippage', 0.0002)
+        self.position_size = env_config.get('position_size', 0.05)
+        self.max_position_ratio = env_config.get('max_position_ratio', 0.8)
+        self.min_trade_amount = env_config.get('min_trade_amount', 5000)
+        self.buy_threshold = env_config.get('buy_threshold', 0.1)
+        self.sell_threshold = env_config.get('sell_threshold', -0.1)
+        self.reward_scale = env_config.get('reward_scale', 1.0)
+        self.risk_penalty = env_config.get('risk_penalty', 0.005)
+        
+        # 观察空间配置
+        observation_config = env_config.get('observation_features', {})
+        self.include_raw_ohlc = observation_config.get('include_raw_ohlc', False)
+        self.include_normalized_ohlc = observation_config.get('include_normalized_ohlc', True)
+        self.include_price_changes = observation_config.get('include_price_changes', True)
+        self.include_volume = observation_config.get('include_volume', False)
+        self.include_technical_indicators = observation_config.get('include_technical_indicators', True)
+        self.include_account_info = observation_config.get('include_account_info', True)
+
+        # 交易信号配置
+        trading_config = env_config.get('trading_signals', {})
+        self.enabled_signals = trading_config.get('enabled_signals', ['RSI_signal', 'BB_signal', 'SMA_signal'])
+        self.weight_min = trading_config.get('weight_min', 0.0)
+        self.weight_max = trading_config.get('weight_max', 1.0)
+        
         # 信号因子列
-        self.signal_columns = ['RSI_signal', 'BB_signal', 'SMA_signal']
+        self.signal_columns = self.enabled_signals
         # OHLC归一化列名
         self.ohlc_columns = ['norm_open', 'norm_high', 'norm_low', 'norm_close']
-        self.initial_balance = env_config.get('initial_balance', 100000)
-        self.transaction_fee = env_config.get('transaction_fee', 0.001)
-        self.slippage = env_config.get('slippage', 0.0005)
-        self.position_size = env_config.get('position_size', 0.1)
-        self.reward_scale = env_config.get('reward_scale', 1.0)
-        self.max_position_ratio = env_config.get('max_position_ratio', 0.9)
-        self.min_trade_amount = env_config.get('min_trade_amount', 1000)
-        # ...如有更多参数可补充
+        # 价格变化率列名
+        self.price_change_columns = ['pct_open', 'pct_high', 'pct_low', 'pct_close']
+        # 原始OHLC列名
+        self.raw_ohlc_columns = ['open', 'high', 'low', 'close']
+        # 成交量列名
+        self.volume_columns = ['volume', 'norm_volume'] if 'volume' in self.df.columns else []
+        
         self._setup_spaces()
         self.trades = []
         self.portfolio_values = []
         self.weights_history = []
 
     def _setup_spaces(self):
-        # 动作空间：3个连续权重
-        self.action_space = spaces.Box(low=0.0, high=1.0, shape=(3,), dtype=np.float32)
-        # 观察空间：3个信号 + 账户信息 + OHLC数据
+        # 动作空间：固定3个连续权重
+        self.action_space = spaces.Box(low=self.weight_min, high=self.weight_max, shape=(3,), dtype=np.float32)
+        
+        # 计算观察空间大小
+        obs_size = 0
+        
+        # 交易信号（固定3个）
+        if self.include_technical_indicators:
+            obs_size += 3  # 固定3个信号：RSI_signal, BB_signal, SMA_signal
+        
+        # 账户信息
+        if self.include_account_info:
+            obs_size += 3  # shares_held, balance, portfolio_value
+        
+        # OHLC归一化数据
+        if self.include_normalized_ohlc:
+            obs_size += len(self.ohlc_columns)
+        
+        # 价格变化率
+        if self.include_price_changes:
+            obs_size += len(self.price_change_columns)
+        
+        # 原始OHLC数据
+        if self.include_raw_ohlc:
+            obs_size += len(self.raw_ohlc_columns)
+        
+        # 成交量数据
+        if self.include_volume:
+            obs_size += len(self.volume_columns)
+        
+        # 观察空间：动态大小的特征向量
         self.observation_space = spaces.Box(
             low=-np.inf,
             high=np.inf,
-            shape=(10,),  # 3信号+3账户+4OHLC
+            shape=(obs_size,),
             dtype=np.float32
         )
 
@@ -109,10 +164,14 @@ class MaxWeightTradingEnv(gym.Env):
             return np.array([1/3, 1/3, 1/3], dtype=np.float32)
 
     def _get_current_signals(self) -> np.ndarray:
+        """获取当前交易信号（始终返回3个信号）"""
         if self.current_step >= len(self.df):
             return np.zeros(3, dtype=np.float32)
         signals = []
-        for signal_col in self.signal_columns:
+        # 始终使用前3个信号：RSI_signal, BB_signal, SMA_signal
+        default_signals = ['RSI_signal', 'BB_signal', 'SMA_signal']
+        
+        for signal_col in default_signals:
             if signal_col in self.df.columns:
                 signal_value = self.df.iloc[self.current_step][signal_col]
                 if pd.isna(signal_value):
@@ -120,12 +179,29 @@ class MaxWeightTradingEnv(gym.Env):
                 signals.append(signal_value)
             else:
                 signals.append(0)
-        return np.array(signals, dtype=np.float32)
+        
+        # 确保返回3个信号
+        while len(signals) < 3:
+            signals.append(0)
+        
+        return np.array(signals[:3], dtype=np.float32)
+
+    def _get_observation_signals(self) -> np.ndarray:
+        """获取观察空间中的交易信号（与交易决策保持一致）"""
+        return self._get_current_signals()
 
     def _signal_to_action(self, signal: float) -> int:
-        if signal > 0.1:
+        """将信号转换为交易动作
+        
+        Args:
+            signal: 交易信号值
+            
+        Returns:
+            -1: 卖出, 0: 持有, 1: 买入
+        """
+        if signal > self.buy_threshold:  # 使用配置的买入阈值
             return 1  # 买入
-        elif signal < -0.1:
+        elif signal < self.sell_threshold:  # 使用配置的卖出阈值
             return -1  # 卖出
         else:
             return 0  # 持有
@@ -176,29 +252,85 @@ class MaxWeightTradingEnv(gym.Env):
         return self.balance + (self.shares_held * current_price)
 
     def _get_observation(self) -> np.ndarray:
+        """获取观察（动态特征组合）"""
         if self.current_step >= len(self.df):
             return np.zeros(self.observation_space.shape[0])
-        current_signals = self._get_current_signals()
-        current_price = self.df.iloc[self.current_step]['close']
         
-        # 获取当前OHLC归一化数据
-        current_ohlc = []
-        for ohlc_col in self.ohlc_columns:
-            if ohlc_col in self.df.columns:
-                ohlc_value = self.df.iloc[self.current_step][ohlc_col]
-                if pd.isna(ohlc_value):
-                    ohlc_value = 1.0  # 默认值
-                current_ohlc.append(ohlc_value)
-            else:
-                current_ohlc.append(1.0)  # 默认值
+        observation_parts = []
         
-        observation = np.concatenate([
-            current_signals,        # 3
-            [self.shares_held],     # 1
-            [self.balance],         # 1
-            [self._get_portfolio_value(current_price)], # 1
-            current_ohlc            # 4
-        ])
+        # 获取当前交易信号
+        if self.include_technical_indicators:
+            current_signals = self._get_observation_signals()
+            observation_parts.append(current_signals)
+        
+        # 获取账户信息
+        if self.include_account_info:
+            current_price = self.df.iloc[self.current_step]['close']
+            account_info = np.array([
+                self.shares_held,  # 当前持仓
+                self.balance,      # 当前余额
+                self._get_portfolio_value(current_price)  # 当前组合价值
+            ])
+            observation_parts.append(account_info)
+        
+        # 获取OHLC归一化数据
+        if self.include_normalized_ohlc:
+            current_ohlc = []
+            for ohlc_col in self.ohlc_columns:
+                if ohlc_col in self.df.columns:
+                    ohlc_value = self.df.iloc[self.current_step][ohlc_col]
+                    if pd.isna(ohlc_value):
+                        ohlc_value = 1.0  # 默认值
+                    current_ohlc.append(ohlc_value)
+                else:
+                    current_ohlc.append(1.0)  # 默认值
+            observation_parts.append(np.array(current_ohlc))
+        
+        # 获取价格变化率数据
+        if self.include_price_changes:
+            current_price_changes = []
+            for pct_col in self.price_change_columns:
+                if pct_col in self.df.columns:
+                    pct_value = self.df.iloc[self.current_step][pct_col]
+                    if pd.isna(pct_value):
+                        pct_value = 0.0  # 默认值
+                    current_price_changes.append(pct_value)
+                else:
+                    current_price_changes.append(0.0)  # 默认值
+            observation_parts.append(np.array(current_price_changes))
+        
+        # 获取原始OHLC数据
+        if self.include_raw_ohlc:
+            current_raw_ohlc = []
+            for ohlc_col in self.raw_ohlc_columns:
+                if ohlc_col in self.df.columns:
+                    ohlc_value = self.df.iloc[self.current_step][ohlc_col]
+                    if pd.isna(ohlc_value):
+                        ohlc_value = 0.0  # 默认值
+                    current_raw_ohlc.append(ohlc_value)
+                else:
+                    current_raw_ohlc.append(0.0)  # 默认值
+            observation_parts.append(np.array(current_raw_ohlc))
+        
+        # 获取成交量数据
+        if self.include_volume:
+            current_volume = []
+            for vol_col in self.volume_columns:
+                if vol_col in self.df.columns:
+                    vol_value = self.df.iloc[self.current_step][vol_col]
+                    if pd.isna(vol_value):
+                        vol_value = 0.0  # 默认值
+                    current_volume.append(vol_value)
+                else:
+                    current_volume.append(0.0)  # 默认值
+            observation_parts.append(np.array(current_volume))
+        
+        # 合并所有特征
+        if observation_parts:
+            observation = np.concatenate(observation_parts)
+        else:
+            observation = np.array([])
+        
         return observation.astype(np.float32)
 
     def get_portfolio_stats(self) -> Dict:
