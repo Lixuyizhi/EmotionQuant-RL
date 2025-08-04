@@ -60,7 +60,7 @@ class SignalWeightTradingEnv(gym.Env):
 
         # 交易信号配置
         trading_config = env_config.get('trading_signals', {})
-        self.enabled_signals = trading_config.get('enabled_signals', ['RSI_signal', 'BB_signal', 'SMA_signal'])
+        self.enabled_signals = trading_config.get('enabled_signals', ['RSI_signal', 'BB_signal', 'SMA_signal', 'MACD_signal'])
         self.weight_min = trading_config.get('weight_min', 0.0)
         self.weight_max = trading_config.get('weight_max', 1.0)
         
@@ -95,21 +95,21 @@ class SignalWeightTradingEnv(gym.Env):
 
     def _setup_spaces(self):
         """设置观察空间和动作空间"""
-        # 动作空间：固定3个权重值（RSI_signal, BB_signal, SMA_signal的权重）
+        # 动作空间：动态权重值（根据启用的信号数量）
         # 权重范围：[weight_min, weight_max]，总和为1
         self.action_space = spaces.Box(
             low=self.weight_min,
             high=self.weight_max,
-            shape=(3,),  # 固定3个信号权重，与原来保持一致
+            shape=(len(self.enabled_signals),),  # 动态信号数量
             dtype=np.float32
         )
         
         # 计算观察空间大小
         obs_size = 0
         
-        # 交易信号（固定3个）
+        # 交易信号（动态数量）
         if self.include_technical_indicators:
-            obs_size += 3  # 固定3个信号：RSI_signal, BB_signal, SMA_signal
+            obs_size += len(self.enabled_signals)  # 动态信号数量
         
         # 账户信息
         if self.include_account_info:
@@ -167,8 +167,8 @@ class SignalWeightTradingEnv(gym.Env):
         weights = self._normalize_weights(action)
         self.signal_weights_history.append(weights.copy())
         
-        # 获取当前交易信号（只取前3个信号）
-        current_signals = self._get_current_signals()[:3]  # 确保只取3个信号
+        # 获取当前交易信号
+        current_signals = self._get_current_signals()
         
         # 计算加权信号总和
         weighted_signal = np.sum(weights * current_signals)
@@ -214,18 +214,16 @@ class SignalWeightTradingEnv(gym.Env):
             return weights / total
         else:
             # 如果所有权重都为0，使用等权重
-            return np.array([1/3, 1/3, 1/3], dtype=np.float32)
+            return np.array([1.0/len(self.enabled_signals)] * len(self.enabled_signals), dtype=np.float32)
 
     def _get_current_signals(self) -> np.ndarray:
-        """获取当前交易信号（始终返回3个信号）"""
+        """获取当前交易信号（使用配置中启用的信号）"""
         if self.current_step >= len(self.df):
-            return np.array([0, 0, 0], dtype=np.float32)
+            return np.zeros(len(self.enabled_signals), dtype=np.float32)
         
         signals = []
-        # 始终使用前3个信号：RSI_signal, BB_signal, SMA_signal
-        default_signals = ['RSI_signal', 'BB_signal', 'SMA_signal']
         
-        for signal_col in default_signals:
+        for signal_col in self.enabled_signals:
             if signal_col in self.df.columns:
                 signal_value = self.df.iloc[self.current_step][signal_col]
                 # 处理NaN值
@@ -235,11 +233,11 @@ class SignalWeightTradingEnv(gym.Env):
             else:
                 signals.append(0)
         
-        # 确保返回3个信号
-        while len(signals) < 3:
+        # 确保返回正确数量的信号
+        while len(signals) < len(self.enabled_signals):
             signals.append(0)
         
-        return np.array(signals[:3], dtype=np.float32)
+        return np.array(signals[:len(self.enabled_signals)], dtype=np.float32)
 
     def _get_observation_signals(self) -> np.ndarray:
         """获取观察空间中的交易信号（与交易决策保持一致）"""
@@ -449,7 +447,7 @@ class SignalWeightTradingEnv(gym.Env):
             'sharpe_ratio': np.mean(returns) / np.std(returns) * np.sqrt(252) if len(returns) > 0 and np.std(returns) > 0 else 0,
             'max_drawdown': self._calculate_max_drawdown(portfolio_values),
             'total_trades': len(self.trades),
-            'avg_signal_weights': np.mean(self.signal_weights_history, axis=0) if self.signal_weights_history else [0, 0, 0]
+            'avg_signal_weights': np.mean(self.signal_weights_history, axis=0) if self.signal_weights_history else [0.0] * len(self.enabled_signals)
         }
         
         return stats
@@ -474,26 +472,18 @@ class SignalWeightTradingEnv(gym.Env):
         weights_array = np.array(self.signal_weights_history)
         
         analysis = {
-            'avg_weights': {
-                'RSI_signal': float(np.mean(weights_array[:, 0])),
-                'BB_signal': float(np.mean(weights_array[:, 1])),
-                'SMA_signal': float(np.mean(weights_array[:, 2]))
-            },
-            'std_weights': {
-                'RSI_signal': float(np.std(weights_array[:, 0])),
-                'BB_signal': float(np.std(weights_array[:, 1])),
-                'SMA_signal': float(np.std(weights_array[:, 2]))
-            },
-            'max_weights': {
-                'RSI_signal': float(np.max(weights_array[:, 0])),
-                'BB_signal': float(np.max(weights_array[:, 1])),
-                'SMA_signal': float(np.max(weights_array[:, 2]))
-            },
-            'min_weights': {
-                'RSI_signal': float(np.min(weights_array[:, 0])),
-                'BB_signal': float(np.min(weights_array[:, 1])),
-                'SMA_signal': float(np.min(weights_array[:, 2]))
-            }
+            'avg_weights': {},
+            'std_weights': {},
+            'max_weights': {},
+            'min_weights': {}
         }
+        
+        # 动态生成权重分析，基于启用的信号
+        for i, signal_name in enumerate(self.enabled_signals):
+            if i < weights_array.shape[1]:  # 确保索引有效
+                analysis['avg_weights'][signal_name] = float(np.mean(weights_array[:, i]))
+                analysis['std_weights'][signal_name] = float(np.std(weights_array[:, i]))
+                analysis['max_weights'][signal_name] = float(np.max(weights_array[:, i]))
+                analysis['min_weights'][signal_name] = float(np.min(weights_array[:, i]))
         
         return analysis 

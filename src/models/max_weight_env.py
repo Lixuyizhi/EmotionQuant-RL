@@ -51,7 +51,7 @@ class MaxWeightTradingEnv(gym.Env):
 
         # 交易信号配置
         trading_config = env_config.get('trading_signals', {})
-        self.enabled_signals = trading_config.get('enabled_signals', ['RSI_signal', 'BB_signal', 'SMA_signal'])
+        self.enabled_signals = trading_config.get('enabled_signals', ['RSI_signal', 'BB_signal', 'SMA_signal', 'MACD_signal'])
         self.weight_min = trading_config.get('weight_min', 0.0)
         self.weight_max = trading_config.get('weight_max', 1.0)
         
@@ -72,15 +72,15 @@ class MaxWeightTradingEnv(gym.Env):
         self.weights_history = []
 
     def _setup_spaces(self):
-        # 动作空间：固定3个连续权重
-        self.action_space = spaces.Box(low=self.weight_min, high=self.weight_max, shape=(3,), dtype=np.float32)
+        # 动作空间：动态权重数量，根据启用的信号数量
+        self.action_space = spaces.Box(low=self.weight_min, high=self.weight_max, shape=(len(self.enabled_signals),), dtype=np.float32)
         
         # 计算观察空间大小
         obs_size = 0
         
-        # 交易信号（固定3个）
+        # 交易信号（动态数量）
         if self.include_technical_indicators:
-            obs_size += 3  # 固定3个信号：RSI_signal, BB_signal, SMA_signal
+            obs_size += len(self.enabled_signals)  # 动态信号数量
         
         # 账户信息
         if self.include_account_info:
@@ -161,17 +161,16 @@ class MaxWeightTradingEnv(gym.Env):
         if total > 0:
             return weights / total
         else:
-            return np.array([1/3, 1/3, 1/3], dtype=np.float32)
+            # 如果所有权重都为0，使用等权重
+            return np.array([1.0/len(self.enabled_signals)] * len(self.enabled_signals), dtype=np.float32)
 
     def _get_current_signals(self) -> np.ndarray:
-        """获取当前交易信号（始终返回3个信号）"""
+        """获取当前交易信号（使用配置中启用的信号）"""
         if self.current_step >= len(self.df):
-            return np.zeros(3, dtype=np.float32)
+            return np.zeros(len(self.enabled_signals), dtype=np.float32)
         signals = []
-        # 始终使用前3个信号：RSI_signal, BB_signal, SMA_signal
-        default_signals = ['RSI_signal', 'BB_signal', 'SMA_signal']
         
-        for signal_col in default_signals:
+        for signal_col in self.enabled_signals:
             if signal_col in self.df.columns:
                 signal_value = self.df.iloc[self.current_step][signal_col]
                 if pd.isna(signal_value):
@@ -180,11 +179,11 @@ class MaxWeightTradingEnv(gym.Env):
             else:
                 signals.append(0)
         
-        # 确保返回3个信号
-        while len(signals) < 3:
+        # 确保返回正确数量的信号
+        while len(signals) < len(self.enabled_signals):
             signals.append(0)
         
-        return np.array(signals[:3], dtype=np.float32)
+        return np.array(signals[:len(self.enabled_signals)], dtype=np.float32)
 
     def _get_observation_signals(self) -> np.ndarray:
         """获取观察空间中的交易信号（与交易决策保持一致）"""

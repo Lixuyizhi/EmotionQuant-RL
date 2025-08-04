@@ -244,6 +244,21 @@ class FeatureEngineer:
             df['position_signal'] = np.where(df['bb_position'] < 0.2, 1,  # 接近下轨买入
                                            np.where(df['bb_position'] > 0.8, -1, 0))  # 接近上轨卖出
         
+        # 11. CCI信号（新增）
+        if 'CCI_14' in df.columns:
+            df['CCI_signal'] = np.where(df['CCI_14'] > 100, -1,  # 超买卖出
+                                      np.where(df['CCI_14'] < -100, 1, 0))  # 超买卖入
+        
+        # 12. 威廉指标信号（新增）
+        if 'Williams_R_14' in df.columns:
+            df['Williams_signal'] = np.where(df['Williams_R_14'] > -20, -1,  # 超买卖出
+                                           np.where(df['Williams_R_14'] < -80, 1, 0))  # 超买卖入
+        
+        # 13. 随机指标信号（新增）
+        if 'Stoch_K' in df.columns and 'Stoch_D' in df.columns:
+            df['Stochastic_signal'] = np.where((df['Stoch_K'] > 80) & (df['Stoch_D'] > 80), -1,  # 超买卖出
+                                             np.where((df['Stoch_K'] < 20) & (df['Stoch_D'] < 20), 1, 0))  # 超买卖入
+        
         return df
     
 

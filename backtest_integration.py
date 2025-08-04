@@ -22,20 +22,44 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 def parse_model_filename(model_filename):
-    # 支持两种格式：
-    # 1. A2C_MaxWeightTradingEnv_model.zip
-    # 2. best/A2C_MaxWeightTradingEnv_best_model/best_model.zip
-    # 先尝试第一种
-    match = re.match(r"([A-Za-z0-9]+)_([A-Za-z0-9]+)_model\.zip", model_filename)
-    if match:
-        algo, env_name = match.group(1), match.group(2)
+    """解析模型文件名，支持两种格式：
+    1. PPO_SignalWeightTradingEnv_model.zip
+    2. best_model.zip (在best目录下)
+    """
+    logger.info(f"解析模型文件名: {model_filename}")
+    
+    # 格式1: 直接模型文件 (如: PPO_SignalWeightTradingEnv_model.zip)
+    match1 = re.match(r"([A-Za-z0-9]+)_([A-Za-z0-9]+)_model\.zip", model_filename)
+    if match1:
+        algo, env_name = match1.group(1), match1.group(2)
+        logger.info(f"匹配格式1: 算法={algo}, 环境={env_name}")
         return algo, env_name
-    # 再尝试第二种
-    match2 = re.search(r"([A-Za-z0-9]+)_([A-Za-z0-9]+)_best_model", model_filename)
-    if match2:
-        algo, env_name = match2.group(1), match2.group(2)
+    
+    # 格式2: best_model.zip (在best目录下)
+    if model_filename == "best_model.zip":
+        # 从完整路径中提取信息
+        # 完整路径格式: models/best/PPO_SignalWeightTradingEnv_best_model/best_model.zip
+        # 需要从路径中提取算法和环境信息
+        logger.warning("检测到best_model.zip格式，需要从路径中提取算法和环境信息")
+        # 这里需要特殊处理，暂时返回默认值
+        return "PPO", "SignalWeightTradingEnv"
+    
+    # 格式3: 从完整路径中提取 (如: models/best/PPO_SignalWeightTradingEnv_best_model/best_model.zip)
+    # 提取路径中的算法和环境信息
+    path_match = re.search(r"([A-Za-z0-9]+)_([A-Za-z0-9]+)_best_model", model_filename)
+    if path_match:
+        algo, env_name = path_match.group(1), path_match.group(2)
+        logger.info(f"从路径中提取: 算法={algo}, 环境={env_name}")
         return algo, env_name
-    raise ValueError("模型文件名格式不正确，应为: 算法_环境_model.zip 或 .../算法_环境_best_model/best_model.zip")
+    
+    # 如果都不匹配，尝试更宽松的匹配
+    match3 = re.search(r"([A-Za-z0-9]+)_([A-Za-z0-9]+)", model_filename)
+    if match3:
+        algo, env_name = match3.group(1), match3.group(2)
+        logger.warning(f"使用宽松匹配解析模型文件名: {model_filename}")
+        return algo, env_name
+    
+    raise ValueError(f"模型文件名格式不正确: {model_filename}，应为: 算法_环境_model.zip 或 .../算法_环境_best_model/best_model.zip")
 
 def prepare_backtest_data(config, start_date=None, end_date=None, data_source='local'):
     """准备回测数据
@@ -126,7 +150,21 @@ def run_backtest(model_path, df_backtest, config, save_results=True):
     
     try:
         # 1. 解析模型文件名，确定算法和环境
-        algo, env_name = parse_model_filename(os.path.basename(model_path))
+        # 如果文件名是best_model.zip，需要从完整路径中提取信息
+        if os.path.basename(model_path) == "best_model.zip":
+            # 从完整路径中提取算法和环境信息
+            path_match = re.search(r"([A-Za-z0-9]+)_([A-Za-z0-9]+)_best_model", model_path)
+            if path_match:
+                algo, env_name = path_match.group(1), path_match.group(2)
+                logger.info(f"从完整路径中提取: 算法={algo}, 环境={env_name}")
+            else:
+                # 如果无法从路径提取，使用默认值
+                algo, env_name = "PPO", "SignalWeightTradingEnv"
+                logger.warning(f"无法从路径提取算法和环境信息，使用默认值: {algo}, {env_name}")
+        else:
+            # 使用文件名解析
+            algo, env_name = parse_model_filename(os.path.basename(model_path))
+        
         env_module = "signal_weight_env" if "SignalWeight" in env_name else "max_weight_env"
         
         logger.info(f"模型算法: {algo}")
