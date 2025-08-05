@@ -350,7 +350,7 @@ class SignalWeightTradingEnv(gym.Env):
     def _calculate_improved_reward(self, base_reward: float, action: int, current_price: float,
                                  shares_before: int, balance_before: float,
                                  portfolio_value_before: float, portfolio_value_after: float) -> float:
-        """计算改进的奖励函数
+        """计算改进的奖励函数 - 保守策略版本
         
         包含以下组件：
         1. 基础收益奖励
@@ -358,67 +358,68 @@ class SignalWeightTradingEnv(gym.Env):
         3. 风险调整奖励
         4. 持仓平衡奖励
         5. 风险惩罚
+        6. 交易质量奖励
         """
         reward = 0.0
         
         # 1. 基础收益奖励（应用缩放）
         reward += base_reward * self.reward_scale
         
-        # 2. 交易激励奖励（鼓励高质量交易）
+        # 2. 交易激励奖励（大幅降低，鼓励谨慎交易）
         if action != 0:  # 如果有交易行为
-            # 交易激励：给予小额正向奖励
-            trade_incentive = 50  # 降低基础交易激励
+            # 交易激励：给予很小的正向奖励
+            trade_incentive = 10  # 大幅降低基础交易激励
             reward += trade_incentive
             
             # 如果交易带来收益，给予额外奖励
             if base_reward > 0:
-                profit_bonus = base_reward * 0.2  # 增加收益奖励比例
+                profit_bonus = base_reward * 0.5  # 增加收益奖励比例
                 reward += profit_bonus
             else:
-                # 亏损交易给予小额惩罚
-                loss_penalty = base_reward * 0.1
+                # 亏损交易给予较大惩罚
+                loss_penalty = base_reward * 0.3  # 增加亏损惩罚
                 reward += loss_penalty
         
-        # 3. 风险调整奖励（基于夏普比率思想）
+        # 3. 风险调整奖励（降低放大倍数）
         if len(self.portfolio_values) > 1:
             # 计算收益率
             returns = (portfolio_value_after - portfolio_value_before) / portfolio_value_before
             # 简单的风险调整：收益率越高，奖励越大
             if returns > 0:
-                risk_adjusted_bonus = returns * 500  # 降低放大倍数
+                risk_adjusted_bonus = returns * 200  # 大幅降低放大倍数
                 reward += risk_adjusted_bonus
         
         # 4. 持仓平衡奖励（鼓励适度持仓）
         current_position_ratio = (self.shares_held * current_price) / self.initial_balance
-        optimal_position_ratio = 0.5  # 调整理想持仓比例
+        optimal_position_ratio = 0.3  # 降低理想持仓比例，更加保守
         
         # 持仓平衡奖励：越接近理想持仓，奖励越高
         position_balance = 1.0 - abs(current_position_ratio - optimal_position_ratio)
-        position_bonus = position_balance * 30  # 降低持仓平衡奖励
+        position_bonus = position_balance * 15  # 降低持仓平衡奖励
         reward += position_bonus
         
-        # 5. 风险惩罚（减少惩罚强度）
+        # 5. 风险惩罚（增加惩罚强度）
         if current_position_ratio > self.max_position_ratio:
             risk_penalty = (current_position_ratio - self.max_position_ratio) * self.risk_penalty
             reward -= risk_penalty
         
-        # 6. 空仓惩罚（避免长期空仓）
-        if current_position_ratio < 0.05 and action == 0:  # 空仓且不交易
-            empty_position_penalty = -10  # 减少空仓惩罚
+        # 6. 空仓惩罚（减少空仓惩罚，允许空仓）
+        if current_position_ratio < 0.02 and action == 0:  # 降低空仓阈值
+            empty_position_penalty = -5  # 减少空仓惩罚
             reward += empty_position_penalty
         
-        # 7. 过度交易惩罚（减少惩罚，允许适度交易）
+        # 7. 过度交易惩罚（大幅增加惩罚）
         if len(self.trades) > 0:
-            recent_trades = [t for t in self.trades if t['step'] >= self.current_step - 20]
-            if len(recent_trades) > 8:  # 放宽过度交易限制
-                overtrading_penalty = -15  # 减少过度交易惩罚
+            recent_trades = [t for t in self.trades if t['step'] >= self.current_step - 30]
+            if len(recent_trades) > 5:  # 大幅降低过度交易限制
+                overtrading_penalty = -50  # 大幅增加过度交易惩罚
                 reward += overtrading_penalty
         
-        # 8. 新增：交易质量奖励
+        # 8. 新增：交易质量奖励（增加质量奖励）
         if action != 0 and len(self.trades) > 0:
             # 检查最近交易的盈利情况
             recent_profitable_trades = 0
-            recent_trades = [t for t in self.trades if t['step'] >= self.current_step - 10]
+            recent_trades = [t for t in self.trades if t['step'] >= self.current_step - 15]
             
             for trade in recent_trades:
                 if trade['action'] == 'buy':
@@ -433,8 +434,24 @@ class SignalWeightTradingEnv(gym.Env):
             # 交易质量奖励
             if len(recent_trades) > 0:
                 success_rate = recent_profitable_trades / len(recent_trades)
-                quality_bonus = success_rate * 20  # 成功交易奖励
+                quality_bonus = success_rate * 30  # 增加成功交易奖励
                 reward += quality_bonus
+        
+        # 9. 新增：连续亏损惩罚
+        if len(self.portfolio_values) > 1:
+            # 检查最近几步是否连续亏损
+            recent_values = self.portfolio_values[-5:] if len(self.portfolio_values) >= 5 else self.portfolio_values
+            if len(recent_values) >= 3:
+                consecutive_losses = 0
+                for i in range(1, len(recent_values)):
+                    if recent_values[i] < recent_values[i-1]:
+                        consecutive_losses += 1
+                    else:
+                        consecutive_losses = 0
+                
+                if consecutive_losses >= 3:  # 连续3次亏损
+                    consecutive_loss_penalty = -20
+                    reward += consecutive_loss_penalty
         
         return reward
 
