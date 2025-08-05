@@ -207,6 +207,11 @@ class MaxWeightTradingEnv(gym.Env):
 
     def _execute_trade(self, action: int, current_price: float) -> float:
         portfolio_value_before = self._get_portfolio_value(current_price)
+        
+        # 记录交易前的状态
+        shares_before = self.shares_held
+        balance_before = self.balance
+        
         if action == -1:  # 卖出
             if self.shares_held > 0:
                 shares_to_sell = min(self.shares_held, int(self.shares_held * self.position_size))
@@ -243,8 +248,109 @@ class MaxWeightTradingEnv(gym.Env):
                             'price': buy_price,
                             'value': buy_value
                         })
+        
+        # 计算基础奖励（组合价值变化）
         portfolio_value_after = self._get_portfolio_value(current_price)
-        reward = portfolio_value_after - portfolio_value_before
+        base_reward = portfolio_value_after - portfolio_value_before
+        
+        # 改进的奖励函数设计
+        reward = self._calculate_improved_reward(
+            base_reward, action, current_price, 
+            shares_before, balance_before, 
+            portfolio_value_before, portfolio_value_after
+        )
+        
+        return reward
+
+    def _calculate_improved_reward(self, base_reward: float, action: int, current_price: float,
+                                 shares_before: int, balance_before: float,
+                                 portfolio_value_before: float, portfolio_value_after: float) -> float:
+        """计算改进的奖励函数
+        
+        包含以下组件：
+        1. 基础收益奖励
+        2. 交易激励奖励
+        3. 风险调整奖励
+        4. 持仓平衡奖励
+        5. 风险惩罚
+        """
+        reward = 0.0
+        
+        # 1. 基础收益奖励（应用缩放）
+        reward += base_reward * self.reward_scale
+        
+        # 2. 交易激励奖励（鼓励高质量交易）
+        if action != 0:  # 如果有交易行为
+            # 交易激励：给予小额正向奖励
+            trade_incentive = 50  # 降低基础交易激励
+            reward += trade_incentive
+            
+            # 如果交易带来收益，给予额外奖励
+            if base_reward > 0:
+                profit_bonus = base_reward * 0.2  # 增加收益奖励比例
+                reward += profit_bonus
+            else:
+                # 亏损交易给予小额惩罚
+                loss_penalty = base_reward * 0.1
+                reward += loss_penalty
+        
+        # 3. 风险调整奖励（基于夏普比率思想）
+        if len(self.portfolio_values) > 1:
+            # 计算收益率
+            returns = (portfolio_value_after - portfolio_value_before) / portfolio_value_before
+            # 简单的风险调整：收益率越高，奖励越大
+            if returns > 0:
+                risk_adjusted_bonus = returns * 500  # 降低放大倍数
+                reward += risk_adjusted_bonus
+        
+        # 4. 持仓平衡奖励（鼓励适度持仓）
+        current_position_ratio = (self.shares_held * current_price) / self.initial_balance
+        optimal_position_ratio = 0.5  # 调整理想持仓比例
+        
+        # 持仓平衡奖励：越接近理想持仓，奖励越高
+        position_balance = 1.0 - abs(current_position_ratio - optimal_position_ratio)
+        position_bonus = position_balance * 30  # 降低持仓平衡奖励
+        reward += position_bonus
+        
+        # 5. 风险惩罚（减少惩罚强度）
+        if current_position_ratio > self.max_position_ratio:
+            risk_penalty = (current_position_ratio - self.max_position_ratio) * self.risk_penalty
+            reward -= risk_penalty
+        
+        # 6. 空仓惩罚（避免长期空仓）
+        if current_position_ratio < 0.05 and action == 0:  # 空仓且不交易
+            empty_position_penalty = -10  # 减少空仓惩罚
+            reward += empty_position_penalty
+        
+        # 7. 过度交易惩罚（减少惩罚，允许适度交易）
+        if len(self.trades) > 0:
+            recent_trades = [t for t in self.trades if t['step'] >= self.current_step - 20]
+            if len(recent_trades) > 8:  # 放宽过度交易限制
+                overtrading_penalty = -15  # 减少过度交易惩罚
+                reward += overtrading_penalty
+        
+        # 8. 新增：交易质量奖励
+        if action != 0 and len(self.trades) > 0:
+            # 检查最近交易的盈利情况
+            recent_profitable_trades = 0
+            recent_trades = [t for t in self.trades if t['step'] >= self.current_step - 10]
+            
+            for trade in recent_trades:
+                if trade['action'] == 'buy':
+                    # 买入后价格上涨
+                    if current_price > trade['price']:
+                        recent_profitable_trades += 1
+                elif trade['action'] == 'sell':
+                    # 卖出后价格下跌
+                    if current_price < trade['price']:
+                        recent_profitable_trades += 1
+            
+            # 交易质量奖励
+            if len(recent_trades) > 0:
+                success_rate = recent_profitable_trades / len(recent_trades)
+                quality_bonus = success_rate * 20  # 成功交易奖励
+                reward += quality_bonus
+        
         return reward
 
     def _get_portfolio_value(self, current_price: float) -> float:
