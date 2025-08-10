@@ -150,10 +150,20 @@ class RLTrainer:
         # 获取训练过程中的权重历史记录
         weights_history = []
         signal_names = []
-        if hasattr(env.envs[0], 'signal_weights_history') and env.envs[0].signal_weights_history:
-            weights_history = env.envs[0].signal_weights_history
+        
+        # 检查环境类型并获取权重历史
+        if hasattr(env, 'envs') and hasattr(env.envs[0], 'weights_history') and env.envs[0].weights_history:
+            # VecEnv 包装的环境
+            weights_history = env.envs[0].weights_history
             signal_names = env.envs[0].enabled_signals if hasattr(env.envs[0], 'enabled_signals') else []
             logger.info(f"获取到权重历史记录，共 {len(weights_history)} 个时间步")
+        elif hasattr(env, 'weights_history') and env.weights_history:
+            # 直接环境对象
+            weights_history = env.weights_history
+            signal_names = env.enabled_signals if hasattr(env, 'enabled_signals') else []
+            logger.info(f"获取到权重历史记录，共 {len(weights_history)} 个时间步")
+        else:
+            logger.info("未找到权重历史记录")
         
         # 记录最终模型在每个交易时段的权重分配
         final_weights_data = self._record_final_model_weights(model, env, train_df, signal_names, final_model_dir, algo, env_name)
@@ -162,9 +172,16 @@ class RLTrainer:
         
         # 获取权重分析（如果环境支持）
         weights_analysis = {}
-        if hasattr(env.envs[0], 'get_signal_weights_analysis'):
+        if hasattr(env, 'envs') and hasattr(env.envs[0], 'get_signal_weights_analysis'):
+            # VecEnv 包装的环境
             weights_analysis = env.envs[0].get_signal_weights_analysis()
             logger.info(f"信号权重分析: {weights_analysis}")
+        elif hasattr(env, 'get_signal_weights_analysis'):
+            # 直接环境对象
+            weights_analysis = env.get_signal_weights_analysis()
+            logger.info(f"信号权重分析: {weights_analysis}")
+        else:
+            logger.info("环境不支持权重分析功能")
         
         # 保存训练结果
         results_dir = f"{self.storage_config['model_path']}/training_results/"
@@ -218,12 +235,23 @@ class RLTrainer:
         logger.info(f"评估结果已保存到: {eval_file}")
         
         # 保存权重历史数据（如果可用）
-        if hasattr(env.envs[0], 'signal_weights_history') and env.envs[0].signal_weights_history:
-            weights_history = env.envs[0].signal_weights_history
-            weights_file = f"{results_dir}/{algo}_{env_name}_weights_history.json"
-            with open(weights_file, 'w', encoding='utf-8') as f:
+        if weights_history:  # 使用之前获取的权重历史
+            
+            # 同时保存到models目录，便于可视化脚本访问
+            models_weights_dir = f"{self.storage_config['model_path']}/weights_data"
+            os.makedirs(models_weights_dir, exist_ok=True)
+            models_weights_file = f"{models_weights_dir}/{algo}_{env_name}_weights_history.json"
+            with open(models_weights_file, 'w', encoding='utf-8') as f:
                 json.dump(to_serializable(weights_history), f, ensure_ascii=False, indent=2)
-            logger.info(f"权重历史数据已保存到: {weights_file}")
+            logger.info(f"权重历史数据已保存到: {models_weights_file}")
+            
+            # 保存信号名称信息
+            signal_names_file = f"{models_weights_dir}/{algo}_{env_name}_signal_names.json"
+            with open(signal_names_file, 'w', encoding='utf-8') as f:
+                json.dump(signal_names, f, ensure_ascii=False, indent=2)
+            logger.info(f"信号名称已保存到: {signal_names_file}")
+        else:
+            logger.info("无权重历史数据可保存")
         
         return {
             'model': model,
@@ -507,15 +535,32 @@ class RLTrainer:
                 date_str = str(current_data.get('date', f'step_{step}'))
                 
                 # 记录权重信息
+                # 检查环境类型并获取相关属性
+                if hasattr(env, 'envs') and hasattr(env.envs[0], 'get_portfolio_value'):
+                    # VecEnv 包装的环境
+                    portfolio_value = env.envs[0].get_portfolio_value(current_data['close'])
+                    position = env.envs[0].shares if hasattr(env.envs[0], 'shares') else 0
+                    balance = env.envs[0].balance if hasattr(env.envs[0], 'balance') else 0
+                elif hasattr(env, 'get_portfolio_value'):
+                    # 直接环境对象
+                    portfolio_value = env.get_portfolio_value(current_data['close'])
+                    position = env.shares if hasattr(env, 'shares') else 0
+                    balance = env.balance if hasattr(env, 'balance') else 0
+                else:
+                    # 环境不支持这些属性
+                    portfolio_value = None
+                    position = 0
+                    balance = 0
+                
                 weight_record = {
                     'step': step,
                     'date': date_str,
                     'weights': action.tolist() if hasattr(action, 'tolist') else action,
                     'signal_names': signal_names,
-                    'portfolio_value': env.envs[0].get_portfolio_value(current_data['close']) if hasattr(env.envs[0], 'get_portfolio_value') else None,
+                    'portfolio_value': portfolio_value,
                     'current_price': float(current_data['close']),
-                    'position': env.envs[0].shares if hasattr(env.envs[0], 'shares') else 0,
-                    'balance': env.envs[0].balance if hasattr(env.envs[0], 'balance') else 0
+                    'position': position,
+                    'balance': balance
                 }
                 
                 weights_records.append(weight_record)

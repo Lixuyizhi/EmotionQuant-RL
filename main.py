@@ -20,7 +20,7 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 # 导入三个主要模块
 from data_processing import process_data, load_processed_data
 from model_training import train_model
-from backtest_integration import compare_strategies, load_trained_model
+from backtest_integration import run_backtest, prepare_backtest_data
 
 
 # 设置matplotlib中文字体
@@ -42,8 +42,9 @@ logger = logging.getLogger(__name__)
 def load_config(config_path: str = "config/config.yaml") -> dict:
     """加载配置文件"""
     try:
-        with open(config_path, 'r', encoding='utf-8') as f:
-            config = yaml.safe_load(f)
+        from src.utils.config_manager import ConfigManager
+        config_manager = ConfigManager(config_path)
+        config = config_manager.processed_config
         logger.info("配置文件加载成功")
         return config
     except Exception as e:

@@ -5,6 +5,13 @@ from gymnasium import spaces
 from typing import Dict, List, Tuple, Optional
 import logging
 import yaml
+import sys
+import os
+
+# 添加项目根目录到路径
+sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+
+from src.utils.config_manager import ConfigManager
 
 logger = logging.getLogger(__name__)
 
@@ -12,14 +19,21 @@ class MaxWeightTradingEnv(gym.Env):
     """最大权重信号交易环境：模型输出权重，实际只用权重最大的因子信号做交易决策"""
     def __init__(self, df: pd.DataFrame, config_path: str = "config/config.yaml", env_kwargs: dict = None, **kwargs):
         super().__init__()
-        with open(config_path, 'r', encoding='utf-8') as f:
-            config = yaml.safe_load(f)
-        # 读取默认参数
-        # 优先从model_training.max_weight_env，否则从backtest.env_params.max_weight_env
-        file_config = config.get('model_training', {}).get('max_weight_env', {})
-        if not file_config:
-            file_config = config.get('backtest', {}).get('env_params', {}).get('max_weight_env', {})
-        env_config = dict(file_config)
+        # 使用配置管理器加载配置
+        try:
+            config_manager = ConfigManager(config_path)
+            env_config = config_manager.get_env_config('max_weight_env')
+        except Exception as e:
+            logger.warning(f"配置管理器加载失败，使用传统方式: {e}")
+            # 回退到传统配置加载方式
+            with open(config_path, 'r', encoding='utf-8') as f:
+                config = yaml.safe_load(f)
+            file_config = config.get('model_training', {}).get('max_weight_env', {})
+            if not file_config:
+                file_config = config.get('backtest', {}).get('env_params', {}).get('max_weight_env', {})
+            env_config = dict(file_config)
+        
+        # 合并外部参数，优先用env_kwargs和kwargs
         if env_kwargs:
             env_config.update(env_kwargs)
         env_config.update(kwargs)
@@ -481,4 +495,28 @@ class MaxWeightTradingEnv(gym.Env):
             dd = (peak - value) / peak
             if dd > max_dd:
                 max_dd = dd
-        return max_dd 
+        return max_dd
+
+    def get_signal_weights_analysis(self) -> Dict:
+        """获取信号权重分析"""
+        if not self.weights_history:
+            return {}
+        
+        weights_array = np.array(self.weights_history)
+        
+        analysis = {
+            'avg_weights': {},
+            'std_weights': {},
+            'max_weights': {},
+            'min_weights': {}
+        }
+        
+        # 动态生成权重分析，基于启用的信号
+        for i, signal_name in enumerate(self.enabled_signals):
+            if i < weights_array.shape[1]:  # 确保索引有效
+                analysis['avg_weights'][signal_name] = float(np.mean(weights_array[:, i]))
+                analysis['std_weights'][signal_name] = float(np.std(weights_array[:, i]))
+                analysis['max_weights'][signal_name] = float(np.max(weights_array[:, i]))
+                analysis['min_weights'][signal_name] = float(np.min(weights_array[:, i]))
+        
+        return analysis 

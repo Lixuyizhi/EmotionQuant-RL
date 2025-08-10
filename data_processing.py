@@ -35,8 +35,9 @@ logger = logging.getLogger(__name__)
 def load_config(config_path: str = "config/config.yaml") -> dict:
     """加载配置文件"""
     try:
-        with open(config_path, 'r', encoding='utf-8') as f:
-            config = yaml.safe_load(f)
+        from src.utils.config_manager import ConfigManager
+        config_manager = ConfigManager(config_path)
+        config = config_manager.processed_config
         logger.info("配置文件加载成功")
         return config
     except Exception as e:

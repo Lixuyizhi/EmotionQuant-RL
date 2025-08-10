@@ -5,6 +5,13 @@ from gymnasium import spaces
 from typing import Dict, List, Tuple, Optional
 import logging
 import yaml
+import sys
+import os
+
+# 添加项目根目录到路径
+sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+
+from src.utils.config_manager import ConfigManager
 
 logger = logging.getLogger(__name__)
 
@@ -16,13 +23,18 @@ class SignalWeightTradingEnv(gym.Env):
     
     def __init__(self, df: pd.DataFrame, config_path: str = "config/config.yaml", env_kwargs: dict = None, **kwargs):
         super().__init__()
-        # 读取配置
-        with open(config_path, 'r', encoding='utf-8') as f:
-            config = yaml.safe_load(f)
-        # 读取默认参数
-        file_config = config.get('model_training', {}).get('signal_weight_env', {})
+        # 使用配置管理器加载配置
+        try:
+            config_manager = ConfigManager(config_path)
+            env_config = config_manager.get_env_config('signal_weight_env')
+        except Exception as e:
+            logger.warning(f"配置管理器加载失败，使用传统方式: {e}")
+            # 回退到传统配置加载方式
+            with open(config_path, 'r', encoding='utf-8') as f:
+                config = yaml.safe_load(f)
+            env_config = config.get('model_training', {}).get('signal_weight_env', {})
+        
         # 合并外部参数，优先用env_kwargs和kwargs
-        env_config = dict(file_config)
         if env_kwargs:
             env_config.update(env_kwargs)
         env_config.update(kwargs)
@@ -91,7 +103,7 @@ class SignalWeightTradingEnv(gym.Env):
         self._setup_spaces()
         self.trades = []
         self.portfolio_values = []
-        self.signal_weights_history = []
+        self.weights_history = []
 
     def _setup_spaces(self):
         """设置观察空间和动作空间"""
@@ -151,7 +163,7 @@ class SignalWeightTradingEnv(gym.Env):
         self.total_buy_value = 0
         self.trades = []
         self.portfolio_values = []
-        self.signal_weights_history = []
+        self.weights_history = []
         
         obs = self._get_observation()
         info = {}
@@ -161,11 +173,11 @@ class SignalWeightTradingEnv(gym.Env):
         """执行一步交易
         
         Args:
-            action: 3个权重值 [rsi_weight, bb_weight, sma_weight]
+            action: 动态数量的权重值
         """
         # 归一化权重，确保总和为1
         weights = self._normalize_weights(action)
-        self.signal_weights_history.append(weights.copy())
+        self.weights_history.append(weights.copy())
         
         # 获取当前交易信号
         current_signals = self._get_current_signals()
@@ -285,15 +297,13 @@ class SignalWeightTradingEnv(gym.Env):
                     self.total_shares_sold += shares_to_sell
                     self.total_sales_value += sell_value
                     
-                    # 记录交易
+                                        # 记录交易
                     self.trades.append({
                         'step': self.current_step,
                         'action': 'sell',
                         'shares': shares_to_sell,
                         'price': sell_price,
-                        'value': sell_value,
-                        'transaction_fee': shares_to_sell * current_price * self.transaction_fee,
-                        'slippage_cost': shares_to_sell * current_price * self.slippage
+                        'value': sell_value
                     })
                     
         elif action == 1:  # 买入
@@ -329,9 +339,7 @@ class SignalWeightTradingEnv(gym.Env):
                                 'action': 'buy',
                                 'shares': shares_to_buy,
                                 'price': buy_price,
-                                'value': buy_value,
-                                'transaction_fee': shares_to_buy * current_price * self.transaction_fee,
-                                'slippage_cost': shares_to_buy * current_price * self.slippage
+                                'value': buy_value
                             })
         
         # 计算基础奖励（组合价值变化）
@@ -558,7 +566,7 @@ class SignalWeightTradingEnv(gym.Env):
             'sharpe_ratio': np.mean(returns) / np.std(returns) * np.sqrt(252) if len(returns) > 0 and np.std(returns) > 0 else 0,
             'max_drawdown': self._calculate_max_drawdown(portfolio_values),
             'total_trades': len(self.trades),
-            'avg_signal_weights': np.mean(self.signal_weights_history, axis=0) if self.signal_weights_history else [0.0] * len(self.enabled_signals)
+            'avg_signal_weights': np.mean(self.weights_history, axis=0) if self.weights_history else [0.0] * len(self.enabled_signals)
         }
         
         return stats
@@ -577,10 +585,10 @@ class SignalWeightTradingEnv(gym.Env):
 
     def get_signal_weights_analysis(self) -> Dict:
         """获取信号权重分析"""
-        if not self.signal_weights_history:
+        if not self.weights_history:
             return {}
         
-        weights_array = np.array(self.signal_weights_history)
+        weights_array = np.array(self.weights_history)
         
         analysis = {
             'avg_weights': {},
