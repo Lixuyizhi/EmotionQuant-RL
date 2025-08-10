@@ -1,6 +1,6 @@
-# EmotionQuant-RL
+# TechQuant-RL
 
-本项目为基于情绪量化的强化学习交易系统，目前主要针对原油期货进行研究和回测。后续将逐步扩展支持多种不同的期货品种。
+本项目为基于多因子技术指标的强化学习交易系统，目前主要针对原油期货进行研究和回测。后续将逐步扩展支持多种不同的期货品种。
 
 ## 项目简介
 
@@ -191,7 +191,7 @@ PPO_SignalWeightTradingEnv_best_model_backtest_20250804_144938.json
 ## 目录结构
 
 ```
-EmotionQuant-RL/
+TechQuant-RL/
 ├── README.md                  # 项目说明文档
 ├── requirements.txt           # Python依赖包列表
 ├── main.py                    # 主程序入口
